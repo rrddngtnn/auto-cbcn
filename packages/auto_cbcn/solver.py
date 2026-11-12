@@ -11,10 +11,11 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 from dataclasses import dataclass
 
 from .fingerprint import BAD_CN_PREFIXES
-from .harvester import CHAT_BASE_CN, CLI_VER, _derive_id
+from .harvester import BILLING_BASE_CN, CHAT_BASE_CN, CLI_VER, _derive_id
 from .store import load_dotenv_file
 
 load_dotenv_file()
@@ -217,28 +218,57 @@ class EjiemaSmsClient:
 class HaomadunSmsClient:
     """BYOP SMS client for Haomadun (api.haomadun.com/openapi/v1)."""
 
-    def __init__(self, api_key: str | None = None, base_url: str = "https://api.haomadun.com/openapi/v1") -> None:
+    def __init__(
+        self,
+        api_key: str | None = None,
+        base_url: str = "https://api.haomadun.com/openapi/v1",
+        proxy_url: str | None = None,
+    ) -> None:
         load_dotenv_file()
         self.api_key = api_key or os.environ.get("HAOMADUN_API_KEY", "")
         self.base_url = base_url.rstrip("/")
+        self.proxy_url = (proxy_url or os.environ.get("HAOMADUN_PROXY_URL") or os.environ.get("CBCN_PROXY_URL") or "").strip()
+
+    def _proxies(self) -> dict[str, str] | None:
+        raw = self.proxy_url
+        if not raw:
+            cfg = resolve_proxy_playwright_cfg(None)
+            if cfg and cfg.get("server"):
+                u = urllib.parse.urlparse(cfg["server"])
+                if cfg.get("username"):
+                    auth = f"{urllib.parse.quote(cfg['username'])}:{urllib.parse.quote(cfg.get('password', ''))}@"
+                    raw = f"{u.scheme}://{auth}{u.hostname}:{u.port}"
+                else:
+                    raw = cfg["server"]
+        if not raw or raw.lower() in ("none", "direct", "off", "false"):
+            return None
+        if "://" not in raw:
+            raw = f"http://{raw}"
+        return {"http": raw, "https": raw}
 
     def _req(self, method: str, path: str, body: dict | None = None) -> dict:
+        import requests
+
         if not self.api_key:
             raise ValueError("HAOMADUN_API_KEY is required")
-        data = json.dumps(body).encode("utf-8") if body is not None else None
-        req = urllib.request.Request(
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "X-Api-Key": self.api_key,
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "User-Agent": "Mozilla/5.0",
+        }
+        proxies = self._proxies()
+        r = requests.request(
+            method,
             f"{self.base_url}{path}",
-            data=data,
-            headers={
-                "Authorization": f"Bearer {self.api_key}",
-                "Content-Type": "application/json",
-                "Accept": "application/json",
-                "User-Agent": "Mozilla/5.0",
-            },
-            method=method,
+            json=body,
+            headers=headers,
+            proxies=proxies,
+            timeout=15,
         )
-        with urllib.request.urlopen(req, timeout=15) as r:
-            return json.loads(r.read().decode("utf-8", "replace"))
+        r.raise_for_status()
+        return r.json()
 
     def login(self) -> str:
         if not self.api_key:
@@ -280,7 +310,7 @@ class HaomadunSmsClient:
         return None
 
 
-def build_sms_client(provider: str = "feihu"):
+def build_sms_client(provider: str = "feihu", proxy_url: str | None = None):
     """Instantiate a BYOP SMS client by provider name."""
     p = provider.strip().lower()
     if p == "feihu":
@@ -288,7 +318,7 @@ def build_sms_client(provider: str = "feihu"):
     if p in ("ejiema", "eomsg"):
         return EjiemaSmsClient()
     if p == "haomadun":
-        return HaomadunSmsClient()
+        return HaomadunSmsClient(proxy_url=proxy_url)
     raise ValueError(f"Unsupported SMS provider: {provider}")
 
 

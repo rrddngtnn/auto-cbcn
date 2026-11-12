@@ -241,6 +241,39 @@ def test_tcaptcha_solver_contract():
     assert res["bg_w"] == 320
 
 
+def test_haomadun_proxy_and_upgraded_drip_tasks():
+    from unittest.mock import patch, MagicMock
+    from auto_cbcn.cron import SAFE_DRIP_TASKS, run_single_safe_task
+
+    hm_direct = HaomadunSmsClient(api_key="k", proxy_url="direct")
+    assert hm_direct._proxies() is None
+
+    hm_proxy = HaomadunSmsClient(api_key="k", proxy_url="http://u:p@127.0.0.1:9999")
+    assert hm_proxy._proxies() == {"http": "http://u:p@127.0.0.1:9999", "https": "http://u:p@127.0.0.1:9999"}
+
+    for expected in ("skill_1", "automation_1", "template_5", "create_canvas", "expert_5", "Expert_team_use_3"):
+        assert expected in SAFE_DRIP_TASKS
+
+    sess = MagicMock()
+    sess.post.return_value = MagicMock(status_code=200, ok=True, json=lambda: {"code": 0, "data": {}})
+    with patch("auto_cbcn.cron.accept_growth_tasks"), patch("auto_cbcn.cron.time.sleep"), patch(
+        "auto_cbcn.cron.list_growth_tasks", return_value=[{"task_code": "skill_1", "accept_status": "completed"}]
+    ), patch("auto_cbcn.cron.claim_task_reward", return_value={"code": 0}):
+        out = run_single_safe_task("at1", "uid1", "nick", "skill_1", False, session=sess)
+        assert out == "claimed:skill_1:0"
+        posted_json = sess.post.call_args[1]["json"]
+        assert posted_json[0]["eventCode"] == "skill_info"
+
+    with patch("auto_cbcn.cron.accept_growth_tasks"), patch("auto_cbcn.cron.time.sleep"), patch(
+        "auto_cbcn.cron.list_growth_tasks", return_value=[{"task_code": "Sequential_Tasks_2", "accept_status": "completed"}]
+    ), patch("auto_cbcn.cron.claim_task_reward", return_value={"code": 0}):
+        out2 = run_single_safe_task("at1", "uid1", "nick", "Sequential_Tasks_2", True, session=sess)
+        assert out2 == "claimed:Sequential_Tasks_2:0"
+        posted_mp = sess.post.call_args[1]["json"]
+        assert posted_mp[0]["eventCode"] == "expert_actual_use"
+        assert posted_mp[0]["id"] == "WorkspaceBuilder"
+
+
 if __name__ == "__main__":
     test_encryption_roundtrip()
     test_credential_bundle_and_universal_sinks()

@@ -142,7 +142,7 @@ def register_cbcn(
         if deps_dir not in ld:
             os.environ["LD_LIBRARY_PATH"] = f"{deps_dir}:{ld}" if ld else deps_dir
 
-    sms_client = build_sms_client(sms_provider)
+    sms_client = build_sms_client(sms_provider, proxy_url=proxy_url)
     sms_client.login()
     st_info = create_cbcn_cli_state()
 

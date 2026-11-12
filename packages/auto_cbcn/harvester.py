@@ -372,16 +372,22 @@ def harvest_cbcn_all(access_token: str, uid: str = "", nickname: str = "User") -
         time.sleep(1.0)
 
     desktop_evs = [
-        {**fp, "eventCode": "playbook_cta_click", "playbookId": "pb_1", "playbookTitle": "灵感案例"},
-        {**fp, "eventCode": "playbook_prompt_send", "playbookId": "pb_1", "playbookTitle": "灵感案例", "promptLength": 18},
-        {**fp, "eventCode": "buddyapp_enter_click", "from": "sidebar", "isFirstPage": True},
-        {**fp, "eventCode": "buddyapp_tab_click", "tab": "all"},
-        {**fp, "eventCode": "buddyapp_detail_view", "appId": "app_1"},
-        {**fp, "eventCode": "buddyapp_use_click", "appId": "app_1"},
-        {**fp, "eventCode": "buddyapp_launch_success", "appId": "app_1"},
+        {**fp, "eventCode": "playbook_cta_click", "id": "worker-ledger-freedom-dashboard", "name": "打工人小账本", "type": "document", "source": "discover", "position": 0, "conversationId": uuid.uuid4().hex, "requestId": uuid.uuid4().hex},
+        {**fp, "eventCode": "playbook_prompt_send", "id": "worker-ledger-freedom-dashboard", "name": "打工人小账本", "type": "document", "promptLength": 30, "isOfficial": 1, "source": "discover", "conversationId": uuid.uuid4().hex, "requestId": uuid.uuid4().hex},
+        {**fp, "eventCode": "wbx_design_canvas_task_create", "conversationId": uuid.uuid4().hex, "requestId": uuid.uuid4().hex, "source": "summon_keyword", "isCustomModel": False, "name": "", "inputLength": 12, "id": f"wbx-canvas-{ms}", "cost": 0, "isSuccessful": True},
+        {**fp, "eventCode": "skill_info", "skillId": "skill_2096525080079265792", "name": "pptx"},
+        {**fp, "eventCode": "automated_task_create_suc", "name": "每周工作整理", "type": "cron", "source": "manually", "modelId": "deepseek-v4-flash", "modelIsThinking": False, "conversationId": uuid.uuid4().hex, "requestId": uuid.uuid4().hex, "schedule": {"type": "recurring", "rrule": "FREQ=WEEKLY;BYDAY=FR;BYHOUR=9;BYMINUTE=0"}, "prompt": "每周五自动整理本周工作"},
     ]
     for tidx in range(5):
-        desktop_evs.append({**fp, "eventCode": "template_use", "templateId": f"tpl_{tidx}", "templateName": f"Template {tidx}"})
+        desktop_evs.append({**fp, "eventCode": "agent_task_created_with_template", "isCustomModel": True, "id": str(tidx), "name": "幻灯片", "requestId": uuid.uuid4().hex, "conversationId": uuid.uuid4().hex})
+    for ex_id, ex_name in [
+        ("ex_PZw8Gu81HfN4", "运维工程师"), ("ex_ROsDtJbzADFV", "产品经理"),
+        ("ex_SMUnl0nJbPix", "UI设计师"), ("ex_ZTR062oVBOCW", "数据分析师"),
+        ("ex_a3sSSFBy8qaC", "后端架构师"),
+    ]:
+        desktop_evs.append({**fp, "eventCode": "expert_actual_use", "mode": "CLOUD", "id": ex_id, "name": ex_name, "expertTitle": ex_name, "type": "02-Engineering", "expertType": "agent", "source": "builtin", "version": "1.0.2", "cost": 0, "characterCount": 12, "conversationId": uuid.uuid4().hex, "requestId": uuid.uuid4().hex, "requestModelId": "deepseek-v4-flash", "requestModelName": "DeepSeek V4 Flash"})
+    for tm_id, tm_name in [("CloudOpsTeam", "运维专家团队"), ("CloudContentTeam", "内容专家团队"), ("CloudDevTeam", "研发专家团队")]:
+        desktop_evs.append({**fp, "eventCode": "expert_actual_use", "mode": "CLOUD", "id": tm_id, "name": tm_name, "expertTitle": tm_name, "type": "02-Engineering", "expertType": "team", "source": "builtin", "version": "1.0.2", "cost": 0, "characterCount": 12, "conversationId": uuid.uuid4().hex, "requestId": uuid.uuid4().hex, "requestModelId": "deepseek-v4-flash", "requestModelName": "DeepSeek V4 Flash"})
     try:
         requests.post(f"{CHAT_BASE_CN}/v2/report", json=desktop_evs, headers=hdr, timeout=12)
     except Exception:
@@ -436,6 +442,14 @@ def harvest_cbcn_all(access_token: str, uid: str = "", nickname: str = "User") -
 
     try:
         requests.post(f"{CHAT_BASE_CN}/activity/growth/buddy/travel/depart", json={"location_id": 1}, headers=hdr, timeout=10)
+    except Exception:
+        pass
+    try:
+        q = requests.get(f"{CHAT_BASE_CN}/v2/activity/growth/buddy/quota", headers=hdr, timeout=10).json().get("data") or {}
+        aff = int(q.get("affordable") or 0)
+        if aff > 0:
+            cnt = min(aff, max(1, int(q.get("max_open_count") or 1)))
+            requests.post(f"{CHAT_BASE_CN}/v2/activity/growth/buddy/open", json={"count": cnt, "client_token": str(uuid.uuid4())}, headers=hdr, timeout=10)
     except Exception:
         pass
 

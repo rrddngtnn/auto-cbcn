@@ -52,9 +52,14 @@ SAFE_DRIP_TASKS = [
     "first_buddy",
     "Library_read",
     "playbook_prompt",
-    "Buddy_App",
+    "skill_1",
+    "automation_1",
+    "template_5",
+    "create_canvas",
     "RichMeow_Chat",
     "chat_5",
+    "expert_5",
+    "Expert_team_use_3",
     "Sequential_Tasks_1",
     "Sequential_Tasks_2",
     "Sequential_Tasks_3",
@@ -141,19 +146,65 @@ def run_single_safe_task(
         req.post(f"{WEB_BASE_CN}/v2/report", json=ev, headers=_billing_headers(at, uid, {"x-client-platform": "web", "Origin": WEB_BASE_CN, "Referer": doc_url}), timeout=15)
     elif tcode in ("playbook_prompt", "Sequential_Tasks_7"):
         evs = [
-            {**fp, "eventCode": "playbook_cta_click", "playbookId": "pb_1", "playbookTitle": "灵感案例"},
-            {**fp, "eventCode": "playbook_prompt_send", "playbookId": "pb_1", "playbookTitle": "灵感案例", "promptLength": 18},
+            {**fp, "eventCode": "playbook_cta_click", "id": "worker-ledger-freedom-dashboard", "name": "打工人小账本", "type": "document", "source": "discover", "position": 0, "conversationId": cid, "requestId": rid, "messageId": rid},
+            {**fp, "eventCode": "playbook_prompt_send", "id": "worker-ledger-freedom-dashboard", "name": "打工人小账本", "type": "document", "promptLength": 30, "isOfficial": 1, "source": "discover", "conversationId": cid, "requestId": rid, "messageId": rid},
         ]
         req.post(f"{CHAT_BASE_CN}/v2/report", json=evs, headers=_billing_headers(at, uid), timeout=15)
-    elif tcode == "Buddy_App":
-        evs = [
-            {**fp, "eventCode": "buddyapp_enter_click", "from": "sidebar", "isFirstPage": True},
-            {**fp, "eventCode": "buddyapp_tab_click", "tab": "all"},
-            {**fp, "eventCode": "buddyapp_detail_view", "appId": "app_1"},
-            {**fp, "eventCode": "buddyapp_use_click", "appId": "app_1"},
-            {**fp, "eventCode": "buddyapp_launch_success", "appId": "app_1"},
-        ]
+    elif tcode == "skill_1":
+        evs = [{**fp, "eventCode": "skill_info", "skillId": "skill_2096525080079265792", "name": "pptx"}]
         req.post(f"{CHAT_BASE_CN}/v2/report", json=evs, headers=_billing_headers(at, uid), timeout=15)
+    elif tcode == "automation_1":
+        evs = [{
+            **fp, "eventCode": "automated_task_create_suc", "name": "每周工作整理", "type": "cron",
+            "source": "manually", "modelId": "deepseek-v4-flash", "modelIsThinking": False,
+            "conversationId": cid, "requestId": rid,
+            "schedule": {"type": "recurring", "rrule": "FREQ=WEEKLY;BYDAY=FR;BYHOUR=9;BYMINUTE=0"},
+            "prompt": "每周五自动整理本周工作",
+        }]
+        req.post(f"{CHAT_BASE_CN}/v2/report", json=evs, headers=_billing_headers(at, uid), timeout=15)
+    elif tcode == "create_canvas":
+        evs = [{
+            **fp, "eventCode": "wbx_design_canvas_task_create", "conversationId": cid, "requestId": rid,
+            "source": "summon_keyword", "isCustomModel": False, "name": "", "inputLength": 12,
+            "id": f"wbx-canvas-{now_ms}", "cost": 0, "isSuccessful": True,
+        }]
+        req.post(f"{CHAT_BASE_CN}/v2/report", json=evs, headers=_billing_headers(at, uid), timeout=15)
+    elif tcode == "template_5":
+        for i in range(5):
+            ev = [{
+                **fp, "eventCode": "agent_task_created_with_template", "isCustomModel": True,
+                "id": str(i), "name": "幻灯片", "requestId": f"{rid}{i}", "conversationId": f"{cid}{i}",
+            }]
+            req.post(f"{CHAT_BASE_CN}/v2/report", json=ev, headers=_billing_headers(at, uid), timeout=15)
+            time.sleep(1.1)
+    elif tcode == "expert_5":
+        experts = [
+            ("ex_PZw8Gu81HfN4", "运维工程师"), ("ex_ROsDtJbzADFV", "产品经理"),
+            ("ex_SMUnl0nJbPix", "UI设计师"), ("ex_ZTR062oVBOCW", "数据分析师"),
+            ("ex_a3sSSFBy8qaC", "后端架构师"),
+        ]
+        for i, (ex_id, ex_name) in enumerate(experts):
+            ev = [{
+                **fp, "eventCode": "expert_actual_use", "mode": "CLOUD", "id": ex_id, "name": ex_name,
+                "expertTitle": ex_name, "type": "02-Engineering", "expertType": "agent", "source": "builtin",
+                "version": "1.0.2", "cost": 0, "characterCount": 12, "conversationId": f"{cid}{i}",
+                "requestId": f"{rid}{i}", "messageId": f"{rid}{i}",
+                "requestModelId": "deepseek-v4-flash", "requestModelName": "DeepSeek V4 Flash",
+            }]
+            req.post(f"{CHAT_BASE_CN}/v2/report", json=ev, headers=_billing_headers(at, uid), timeout=15)
+            time.sleep(1.1)
+    elif tcode == "Expert_team_use_3":
+        teams = [("CloudOpsTeam", "运维专家团队"), ("CloudContentTeam", "内容专家团队"), ("CloudDevTeam", "研发专家团队")]
+        for i, (tm_id, tm_name) in enumerate(teams):
+            ev = [{
+                **fp, "eventCode": "expert_actual_use", "mode": "CLOUD", "id": tm_id, "name": tm_name,
+                "expertTitle": tm_name, "type": "02-Engineering", "expertType": "team", "source": "builtin",
+                "version": "1.0.2", "cost": 0, "characterCount": 12, "conversationId": f"{cid}{i}",
+                "requestId": f"{rid}{i}", "messageId": f"{rid}{i}",
+                "requestModelId": "deepseek-v4-flash", "requestModelName": "DeepSeek V4 Flash",
+            }]
+            req.post(f"{CHAT_BASE_CN}/v2/report", json=ev, headers=_billing_headers(at, uid), timeout=15)
+            time.sleep(1.1)
     elif tcode in ("RichMeow_Chat", "chat_5"):
         n = 5 if tcode == "chat_5" else 1
         for i in range(n):
@@ -161,14 +212,27 @@ def run_single_safe_task(
             req.post(f"{CHAT_BASE_CN}/v2/report", json=ev, headers=_billing_headers(at, uid), timeout=15)
             time.sleep(2.0 if n > 1 else 0.5)
     elif tcode.startswith("Sequential_Tasks_") and tcode != "Sequential_Tasks_7":
-        ev = [{
-            "eventCode": "chat_request_send", "timestamp": now_ms, "reportDelay": 0,
-            "ideType": "WorkBuddy_MP", "extVersion": "2.2.8", "userId": uid,
-            "userNickname": nick or uid, "machineId": _derive_id(uid or "anon", "mpmachine"),
-            "inputLength": 14, "conversationId": cid, "rootRequestId": rid, "parentConversationId": cid,
-            "agentName": "mp", "agentType": "main",
-        }]
-        req.post(f"{BILLING_BASE_CN}/v2/report", json=ev, headers=_billing_headers(at, uid, {"X-Client-Platform": "mp-weixin", "X-Client-Product": "workbuddy-mp"}), timeout=15)
+        mp_hdr = _billing_headers(at, uid, {"X-Client-Platform": "mp-weixin", "X-Client-Product": "workbuddy-mp", "X-Client-Version": "2.4.0"})
+        mp_base = {
+            "timestamp": now_ms, "reportDelay": 0, "ideType": "WorkBuddy_MP", "extVersion": "2.2.8",
+            "userId": uid, "userNickname": nick or uid, "machineId": _derive_id(uid or "anon", "mpmachine"),
+        }
+        if tcode == "Sequential_Tasks_2":
+            ev = [{**mp_base, "eventCode": "expert_actual_use", "id": "WorkspaceBuilder", "name": "WorkspaceBuilder", "expertTitle": "工作台搭建师", "type": "send_message", "characterCount": 12, "expertType": "agent"}]
+            req.post(f"{BILLING_BASE_CN}/v2/report", json=ev, headers=mp_hdr, timeout=15)
+        elif tcode == "Sequential_Tasks_4":
+            ev = [{**mp_base, "eventCode": "automated_task_create_suc", "mode": "CLOUD", "name": "每日任务提醒", "source": "manually", "skills": "", "skillCount": 0, "scheduleType": "daily"}]
+            req.post(f"{BILLING_BASE_CN}/v2/report", json=ev, headers=mp_hdr, timeout=15)
+        elif tcode == "Sequential_Tasks_5":
+            ev = [{**mp_base, "eventCode": "chat_request_send", "mode": "chat", "inputLength": 14, "conversationId": cid, "rootRequestId": rid, "parentConversationId": cid, "agentName": "mp", "agentType": "main", "requestModelId": "glm-5.2", "requestModelName": "GLM-5.2"}]
+            req.post(f"{BILLING_BASE_CN}/v2/report", json=ev, headers=mp_hdr, timeout=15)
+        else:
+            n = 5 if tcode == "Sequential_Tasks_3" else (10 if tcode == "Sequential_Tasks_6" else 1)
+            for i in range(n):
+                ev = [{**mp_base, "eventCode": "chat_request_send", "mode": "chat", "inputLength": 14, "conversationId": f"{cid}{i}", "requestId": f"{rid}{i}", "rootRequestId": f"{rid}{i}", "parentConversationId": f"{cid}{i}", "agentName": "mp", "agentType": "main"}]
+                req.post(f"{BILLING_BASE_CN}/v2/report", json=ev, headers=mp_hdr, timeout=15)
+                if n > 1:
+                    time.sleep(1.5)
 
     time.sleep(3.0)
     after = list_growth_tasks(at, uid=uid, mp=is_mp, session=session)
@@ -312,6 +376,19 @@ def process_account_record(
             if ts.get("state") == "idle" and not ts.get("daily_limit_reached"):
                 sess.post(f"{CHAT_BASE_CN}/activity/growth/buddy/travel/depart", json={"location_id": random.randint(1, 4)}, headers=_billing_headers(at, uid), timeout=12)
                 res["travel"] = res.get("travel", "") + "+departed"
+    except Exception:
+        pass
+
+    # 4b. Buddy Energy Blindbox
+    try:
+        q_res = sess.get(f"{CHAT_BASE_CN}/v2/activity/growth/buddy/quota", headers=_billing_headers(at, uid), timeout=10).json()
+        q_data = (q_res.get("data") or {}) if q_res.get("code") == 0 else {}
+        aff = int(q_data.get("affordable") or 0)
+        if aff > 0:
+            cnt = min(aff, max(1, int(q_data.get("max_open_count") or 1)))
+            o_res = sess.post(f"{CHAT_BASE_CN}/v2/activity/growth/buddy/open", json={"count": cnt, "client_token": str(uuid.uuid4())}, headers=_billing_headers(at, uid), timeout=12).json()
+            if o_res.get("code") == 0:
+                res["blindbox_opened"] = cnt
     except Exception:
         pass
 
