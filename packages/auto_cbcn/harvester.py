@@ -42,7 +42,6 @@ MP_TASK_CODES = {
     "Sequential_Tasks_4",
     "Sequential_Tasks_5",
     "Sequential_Tasks_6",
-    "Sequential_Tasks_7",
 }
 
 
@@ -279,8 +278,66 @@ def claim_task_reward(access_token: str, task_code: str, uid: str = "", mp: bool
         return {"status": r.status_code}
 
 
+def refresh_cbcn_token(refresh_token: str, access_token: str = "", uid: str = "", timeout: int = 20) -> dict:
+    """Refresh CBCN OAuth credentials (single-use RT rotation!)."""
+    hdrs = {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "User-Agent": f"CLI/{CLI_VER} CodeBuddy/{CLI_VER}",
+        "X-Refresh-Token": refresh_token,
+        "X-Auth-Refresh-Source": "plugin",
+        "X-Product": "SaaS",
+        "X-Domain": "copilot.tencent.com",
+    }
+    if access_token:
+        hdrs["Authorization"] = f"Bearer {access_token}"
+    if uid:
+        hdrs["X-User-Id"] = uid
+    r = requests.post(f"{CHAT_BASE_CN}/v2/plugin/auth/token/refresh", json={}, headers=hdrs, timeout=timeout)
+    if not r.ok:
+        return {"ok": False, "status": r.status_code, "text": r.text[:200]}
+    body = r.json()
+    data = body.get("data") or {}
+    if body.get("code") != 0 or not data.get("accessToken"):
+        return {"ok": False, "code": body.get("code"), "msg": body.get("msg")}
+    return {
+        "ok": True,
+        "access_token": data["accessToken"],
+        "refresh_token": data.get("refreshToken") or refresh_token,
+        "expires_in": int(data.get("expiresIn") or 5184000),
+    }
+
+
+def _desktop_fingerprint(uid: str, nickname: str = "User") -> dict:
+    now = int(time.time() * 1000)
+    return {
+        "timezone": "Asia/Shanghai",
+        "reportDelay": 2000,
+        "userId": uid,
+        "username": nickname or uid,
+        "userNickname": nickname or uid,
+        "product": "SaaS",
+        "releaseDate": 1789036585355,
+        "commit": "5f9692923c93033111c51ad7b003eb80204a9b75",
+        "ideName": "WorkBuddy",
+        "ideType": "WorkBuddy",
+        "ideVersion": DESKTOP_VER,
+        "machineId": _derive_id(uid or "anon", "machine"),
+        "sessionId": _derive_id(uid or "anon", "session"),
+        "extName": "workbuddy-desktop",
+        "extVersion": DESKTOP_VER,
+        "os": "win32",
+        "arch": "x64",
+        "osVersion": "10.0.26220",
+        "cpuCores": 20,
+        "memorySize": 24,
+        "timestamp": now,
+        "presentAt": now,
+    }
+
+
 def harvest_cbcn_all(access_token: str, uid: str = "", nickname: str = "User") -> dict:
-    """Full 19-bonus-pack harvester across cloud tasks, desktop events, mini-program tasks, and cat travel."""
+    """Full bonus-pack harvester across cloud tasks, desktop events, mini-program tasks, and cat travel."""
     safe_res = harvest_cbcn_safe(access_token, uid=uid)
     log_steps = safe_res.get("steps") or {}
 
@@ -294,6 +351,70 @@ def harvest_cbcn_all(access_token: str, uid: str = "", nickname: str = "User") -
         log_steps["accept_mp"] = accept_growth_tasks(access_token, mp_codes, uid, mp=True)
     time.sleep(1.5)
 
+    hdr = _billing_headers(access_token, uid)
+    fp = _desktop_fingerprint(uid, nickname)
+    ms = int(time.time() * 1000)
+
+    # Desktop chat_5 + first_buddy + template_5 + playbook + Buddy_App
+    for i in range(5):
+        cid = uuid.uuid4().hex
+        rid = uuid.uuid4().hex
+        ev = [{**fp, "eventCode": "chat_request_send", "mode": "craft", "conversationId": cid, "requestId": rid, "rootRequestId": rid, "parentConversationId": cid, "inputLength": 14, "agentName": "cli", "agentType": "main"}]
+        try:
+            requests.post(f"{CHAT_BASE_CN}/v2/report", json=ev, headers=hdr, timeout=10)
+        except Exception:
+            pass
+        time.sleep(1.0)
+
+    desktop_evs = [
+        {**fp, "eventCode": "playbook_cta_click", "playbookId": "pb_1", "playbookTitle": "灵感案例"},
+        {**fp, "eventCode": "playbook_prompt_send", "playbookId": "pb_1", "playbookTitle": "灵感案例", "promptLength": 18},
+        {**fp, "eventCode": "buddyapp_enter_click", "from": "sidebar", "isFirstPage": True},
+        {**fp, "eventCode": "buddyapp_tab_click", "tab": "all"},
+        {**fp, "eventCode": "buddyapp_detail_view", "appId": "app_1"},
+        {**fp, "eventCode": "buddyapp_use_click", "appId": "app_1"},
+        {**fp, "eventCode": "buddyapp_launch_success", "appId": "app_1"},
+    ]
+    for tidx in range(5):
+        desktop_evs.append({**fp, "eventCode": "template_use", "templateId": f"tpl_{tidx}", "templateName": f"Template {tidx}"})
+    try:
+        requests.post(f"{CHAT_BASE_CN}/v2/report", json=desktop_evs, headers=hdr, timeout=12)
+    except Exception:
+        pass
+
+    # Adopt buddy & read library doc
+    for b_url in (f"{CHAT_BASE_CN}/activity/growth/buddy/agreement", f"{CHAT_BASE_CN}/activity/growth/buddy/first"):
+        try:
+            requests.post(b_url, json={}, headers=hdr, timeout=10)
+        except Exception:
+            pass
+
+    try:
+        doc_url = "https://www.workbuddy.cn/space/d/o0KWYeynteVv06UnAZqIFm"
+        web_ev = [{
+            "eventCode": "web_element_click", "timestamp": ms, "reportDelay": 0, "pageURL": doc_url,
+            "elementId": "library_doc_intro_click", "elementName": "WorkBuddy资料库介绍",
+            "os": "Win32", "arch": "", "osVersion": "10.0", "userAgent": WEB_UA,
+            "machineId": _derive_id(uid or "anon", "webmachine"), "userId": uid, "userNickname": nickname or uid, "enterpriseId": "",
+        }]
+        requests.post(f"{WEB_BASE_CN}/v2/report", json=web_ev, headers=_billing_headers(access_token, uid, {"x-client-platform": "web", "Origin": WEB_BASE_CN, "Referer": doc_url, "User-Agent": WEB_UA}), timeout=10)
+    except Exception:
+        pass
+
+    # Mini-program event
+    try:
+        mp_ev = [{
+            "eventCode": "chat_request_send", "timestamp": ms, "reportDelay": 0,
+            "ideType": "WorkBuddy_MP", "extVersion": "2.2.8", "userId": uid,
+            "userNickname": nickname or uid, "machineId": _derive_id(uid or "anon", "mpmachine"),
+            "inputLength": 14, "conversationId": uuid.uuid4().hex, "rootRequestId": uuid.uuid4().hex,
+            "parentConversationId": uuid.uuid4().hex, "agentName": "mp", "agentType": "main",
+        }]
+        requests.post(f"{BILLING_BASE_CN}/v2/report", json=mp_ev, headers=_billing_headers(access_token, uid, {"X-Client-Platform": "mp-weixin", "X-Client-Product": "workbuddy-mp", "Origin": BILLING_BASE_CN, "Referer": f"{BILLING_BASE_CN}/"}), timeout=10)
+    except Exception:
+        pass
+
+    time.sleep(3.5)
     claimed_rewards = []
     all_after = list_growth_tasks(access_token, uid, mp=True) + list_growth_tasks(access_token, uid, mp=False)
     seen_codes = set()
@@ -309,7 +430,7 @@ def harvest_cbcn_all(access_token: str, uid: str = "", nickname: str = "User") -
             claimed_rewards.append({"task_code": tcode, "reward": res.get("data")})
 
     try:
-        requests.post(f"{CHAT_BASE_CN}/activity/growth/buddy/travel/depart", json={"location_id": 1}, headers=_billing_headers(access_token, uid), timeout=10)
+        requests.post(f"{CHAT_BASE_CN}/activity/growth/buddy/travel/depart", json={"location_id": 1}, headers=hdr, timeout=10)
     except Exception:
         pass
 

@@ -38,6 +38,7 @@ class RentedPhone:
     project_id: str
     isp: str = ""
     province: str = ""
+    last_event_time: str = ""
 
 
 class FeihuSmsClient:
@@ -87,6 +88,8 @@ class FeihuSmsClient:
         card_type: str = "1",
         isp: str | None = None,
         exclude: str = DEFAULT_EXCLUDE_SEGMENTS,
+        fresh_only: bool = False,
+        **_kwargs,
     ) -> RentedPhone | None:
         params: dict[str, object] = {
             "token": self.ensure_token(),
@@ -108,20 +111,26 @@ class FeihuSmsClient:
         if res.get("code") != 200 or not data.get("phone"):
             return None
         phone = str(data["phone"])
+        oid = str(data["order_id"])
         isp_name = str(data.get("isp") or "")
         prov_name = str(data.get("province") or "")
+        last_ev = str(data.get("last_event_time") or "").strip()
         eff_area = "+852" if (isp_name == "香港" or prov_name == "香港" or len(phone) == 8) else area_code
+        if fresh_only and last_ev:
+            self.release(oid)
+            return None
         if eff_area == "+86" and (phone.startswith(BAD_CN_PREFIXES) or "虚拟" in isp_name):
-            self.release(str(data["order_id"]))
+            self.release(oid)
             return None
         return RentedPhone(
             provider="feihu",
             phone=phone,
             area_code=eff_area,
-            order_id=str(data["order_id"]),
+            order_id=oid,
             project_id=str(pid),
             isp=isp_name,
             province=prov_name,
+            last_event_time=last_ev,
         )
 
     def poll_otp(self, order_id: str, timeout_sec: int = 55, interval_sec: float = 3.5) -> tuple[str | None, str]:
@@ -163,10 +172,15 @@ class EjiemaSmsClient:
             raise RuntimeError(txt)
         return txt
 
+    def login(self) -> str:
+        if not self.token:
+            raise ValueError("EJIEMA_API_TOKEN is required")
+        return self.token
+
     def left_amount(self) -> str:
         return self._call({"code": "leftAmount", "token": self.token})
 
-    def rent_phone(self, keyword: str = "腾讯科技", card_type: str = "实卡") -> RentedPhone | None:
+    def rent_phone(self, keyword: str = "腾讯科技", card_type: str = "实卡", **_kwargs) -> RentedPhone | None:
         for _ in range(5):
             raw = self._call({"code": "getPhone", "token": self.token, "keyWord": keyword, "cardType": card_type})
             m = re.search(r"(1[3-9]\d{9})", raw)
@@ -180,10 +194,10 @@ class EjiemaSmsClient:
             return RentedPhone(provider="ejiema", phone=phone, area_code="+86", order_id=phone, project_id=keyword)
         return None
 
-    def poll_otp(self, phone: str, keyword: str = "腾讯科技", timeout_sec: int = 55, interval_sec: float = 4.0) -> tuple[str | None, str]:
+    def poll_otp(self, order_id: str, keyword: str = "腾讯科技", timeout_sec: int = 55, interval_sec: float = 4.0) -> tuple[str | None, str]:
         deadline = time.time() + timeout_sec
         while time.time() < deadline:
-            raw = self._call({"code": "getMsg", "token": self.token, "phone": phone, "keyWord": keyword})
+            raw = self._call({"code": "getMsg", "token": self.token, "phone": order_id, "keyWord": keyword})
             if "尚未收到" in raw:
                 time.sleep(interval_sec)
                 continue
@@ -193,8 +207,11 @@ class EjiemaSmsClient:
             time.sleep(interval_sec)
         return None, "timeout"
 
-    def release(self, phone: str) -> str:
-        return self._call({"code": "release", "token": self.token, "phone": phone})
+    def release(self, order_id: str) -> str:
+        return self._call({"code": "release", "token": self.token, "phone": order_id})
+
+    def release_all(self) -> None:
+        return None
 
 
 class HaomadunSmsClient:
@@ -223,9 +240,14 @@ class HaomadunSmsClient:
         with urllib.request.urlopen(req, timeout=15) as r:
             return json.loads(r.read().decode("utf-8", "replace"))
 
-    def rent_phone(self, pid: str = "21986", channel_uid: str = "21986-HBY3OAE45E") -> RentedPhone | None:
+    def login(self) -> str:
+        if not self.api_key:
+            raise ValueError("HAOMADUN_API_KEY is required")
+        return self.api_key
+
+    def rent_phone(self, pid: str = "21986", channel_uid: str = "21986-HBY3OAE45E", **_kwargs) -> RentedPhone | None:
         for _ in range(5):
-            res = self._req("POST", "/phone/rent", {"project_id": pid, "platform": "domestic", "channel_uid": channel_uid})
+            res = self._req("POST", "/phone/rent", {"project_id": str(pid), "platform": "domestic", "channel_uid": channel_uid})
             data = res.get("data") or {}
             if res.get("code") != 0 or not data.get("phone"):
                 return None
@@ -235,7 +257,7 @@ class HaomadunSmsClient:
                 self.release(rid)
                 time.sleep(1)
                 continue
-            return RentedPhone(provider="haomadun", phone=phone, area_code="+86", order_id=rid, project_id=pid)
+            return RentedPhone(provider="haomadun", phone=phone, area_code="+86", order_id=rid, project_id=str(pid))
         return None
 
     def poll_otp(self, order_id: str, timeout_sec: int = 45, interval_sec: float = 3.0) -> tuple[str | None, str]:
@@ -253,6 +275,21 @@ class HaomadunSmsClient:
 
     def release(self, order_id: str) -> dict:
         return self._req("POST", f"/phone/{order_id}/release", {})
+
+    def release_all(self) -> None:
+        return None
+
+
+def build_sms_client(provider: str = "feihu"):
+    """Instantiate a BYOP SMS client by provider name."""
+    p = provider.strip().lower()
+    if p == "feihu":
+        return FeihuSmsClient()
+    if p in ("ejiema", "eomsg"):
+        return EjiemaSmsClient()
+    if p == "haomadun":
+        return HaomadunSmsClient()
+    raise ValueError(f"Unsupported SMS provider: {provider}")
 
 
 def solve_tcaptcha_dx(pre_json: dict, bg_bytes: bytes, sp_bytes: bytes) -> dict:

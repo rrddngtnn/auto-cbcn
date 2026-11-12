@@ -3,12 +3,14 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 import datetime
+import http.cookiejar
 import json
 import os
 from pathlib import Path
 import sqlite3
 import sys
 from typing import TextIO
+import urllib.request
 import uuid
 import requests
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -22,7 +24,6 @@ def load_dotenv_file(path: str | Path | None = None) -> None:
         else [
             Path.cwd() / ".env",
             Path(__file__).resolve().parents[2] / ".env",
-            Path.home() / "resources" / "auto-cbcn" / ".env",
         ]
     )
     for p in candidates:
@@ -42,7 +43,7 @@ def load_dotenv_file(path: str | Path | None = None) -> None:
 
 load_dotenv_file()
 
-DEFAULT_DB_PATH = Path(os.environ.get("ROUTER_DB_PATH", str(Path.home() / "omniroute" / "databases" / "storage.sqlite")))
+DEFAULT_DB_PATH = Path(os.environ.get("ROUTER_DB_PATH", "./storage.sqlite"))
 DEFAULT_SALT = os.environ.get("STORAGE_ENCRYPTION_SALT", "styx-field-encryption-v1").encode("utf-8")
 DEFAULT_ROUTER_URL = os.environ.get("ROUTER_URL", "http://127.0.0.1:20128")
 
@@ -124,7 +125,7 @@ def install_cbcn_sqlite(
     secret: str | None = None,
     salt: bytes = DEFAULT_SALT,
 ) -> str:
-    """Insert or update a CBCN connection into SQLite database."""
+    """Insert a CBCN connection into SQLite database with encrypted tokens."""
     conn_id = str(uuid.uuid4())
     now_dt = datetime.datetime.now(datetime.timezone.utc)
     now = now_dt.strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
@@ -152,24 +153,76 @@ def install_cbcn_sqlite(
 def exchange_cbcn_http(
     bundle: CredentialBundle,
     router_url: str = DEFAULT_ROUTER_URL,
+    api_key: str | None = None,
+    password: str | None = None,
     timeout: int = 20,
 ) -> dict:
-    """Exchange or register token via Router HTTP API (POST /api/connections or /api/oauth/codebuddy-cn/exchange)."""
-    payload = {
+    """Push CredentialBundle over HTTP to StyxRouter/OmniRoute, WorkBuddy2API, or generic routers."""
+    base = router_url.rstrip("/")
+    sess = requests.Session()
+    tok = api_key or os.environ.get("ROUTER_API_KEY", "")
+    pwd = password or os.environ.get("ROUTER_PASSWORD", "")
+
+    if tok:
+        sess.headers["Authorization"] = f"Bearer {tok}"
+
+    if pwd and not tok:
+        # StyxRouter / OmniRoute / WorkBuddy2API session cookie login
+        for login_path in ("/api/auth/login", "/admin/login"):
+            try:
+                rl = sess.post(f"{base}{login_path}", json={"password": pwd}, timeout=timeout)
+                if rl.ok:
+                    break
+            except Exception:
+                pass
+
+    exp_iso = (
+        datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(seconds=bundle.expires_in)
+    ).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    # 1. StyxRouter / OmniRoute canonical token import endpoint
+    import_payload = {
         "provider": "codebuddy-cn",
-        "auth_type": "oauth",
-        "name": bundle.name or bundle.phone or "CBCN-Account",
-        "access_token": bundle.access_token,
-        "refresh_token": bundle.refresh_token,
-        "expires_in": bundle.expires_in,
+        "accounts": [
+            {
+                "name": bundle.name or bundle.phone or "CBCN-Account",
+                "accessToken": bundle.access_token,
+                "refreshToken": bundle.refresh_token,
+                "expiresAt": exp_iso,
+                "uid": bundle.uid,
+            }
+        ],
     }
-    url = f"{router_url.rstrip('/')}/api/connections"
-    r = requests.post(url, json=payload, timeout=timeout)
-    if r.status_code == 404:
-        alt_url = f"{router_url.rstrip('/')}/api/oauth/codebuddy-cn/exchange"
-        r = requests.post(alt_url, json={"code": bundle.access_token, "refresh_token": bundle.refresh_token}, timeout=timeout)
-    r.raise_for_status()
-    return r.json()
+    r = sess.post(f"{base}/api/connections/import", json=import_payload, timeout=timeout)
+    if r.status_code not in (404, 405):
+        r.raise_for_status()
+        return r.json()
+
+    # 2. WorkBuddy2API Panel endpoint
+    wb_payload = {
+        "uid": bundle.uid,
+        "nickname": bundle.nickname or bundle.name,
+        "accessToken": bundle.access_token,
+        "refreshToken": bundle.refresh_token,
+        "expiresIn": bundle.expires_in,
+    }
+    r2 = sess.post(f"{base}/admin/account/import", json=wb_payload, timeout=timeout)
+    if r2.status_code not in (404, 405):
+        r2.raise_for_status()
+        return r2.json()
+
+    # 3. Generic / 9Router fallback
+    generic_payload = {
+        "provider": "codebuddy-cn",
+        "authType": "oauth",
+        "name": bundle.name or bundle.phone or "CBCN-Account",
+        "accessToken": bundle.access_token,
+        "refreshToken": bundle.refresh_token,
+        "expiresIn": bundle.expires_in,
+    }
+    r3 = sess.post(f"{base}/api/connections", json=generic_payload, timeout=timeout)
+    r3.raise_for_status()
+    return r3.json()
 
 
 def dispatch_credential_sink(

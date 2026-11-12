@@ -18,14 +18,11 @@ import os
 from pathlib import Path
 import random
 import sqlite3
-import subprocess
 import sys
 import time
-import urllib.parse
 import uuid
 import requests
 
-from .fingerprint import is_recycled_suspect
 from .harvester import (
     BILLING_BASE_CN,
     CHAT_BASE_CN,
@@ -37,14 +34,12 @@ from .harvester import (
     claim_task_reward,
     get_cbcn_user_resource,
     list_growth_tasks,
+    refresh_cbcn_token,
 )
-from .solver import human_drag
 from .store import (
     DEFAULT_DB_PATH,
     DEFAULT_SALT,
-    CredentialBundle,
     decrypt_field,
-    dispatch_credential_sink,
     encrypt_field,
     load_dotenv_file,
     resolve_secret,
@@ -135,7 +130,7 @@ def run_single_safe_task(at: str, uid: str, nick: str, tcode: str, is_mp: bool) 
             "machineId": _derive_id(uid or "anon", "webmachine"), "userId": uid, "userNickname": nick or uid, "enterpriseId": "",
         }]
         requests.post(f"{WEB_BASE_CN}/v2/report", json=ev, headers=_billing_headers(at, uid, {"x-client-platform": "web", "Origin": WEB_BASE_CN, "Referer": doc_url}), timeout=15)
-    elif tcode == "playbook_prompt":
+    elif tcode in ("playbook_prompt", "Sequential_Tasks_7"):
         evs = [
             {**fp, "eventCode": "playbook_cta_click", "playbookId": "pb_1", "playbookTitle": "灵感案例"},
             {**fp, "eventCode": "playbook_prompt_send", "playbookId": "pb_1", "playbookTitle": "灵感案例", "promptLength": 18},
@@ -156,7 +151,7 @@ def run_single_safe_task(at: str, uid: str, nick: str, tcode: str, is_mp: bool) 
             ev = [{**fp, "eventCode": "chat_request_send", "conversationId": cid, "requestId": f"{rid}{i}", "inputLength": 18, "mode": "craft", "agentName": "cli", "agentType": "main", "rootRequestId": f"{rid}{i}", "parentConversationId": cid}]
             requests.post(f"{CHAT_BASE_CN}/v2/report", json=ev, headers=_billing_headers(at, uid), timeout=15)
             time.sleep(2.0 if n > 1 else 0.5)
-    elif tcode.startswith("Sequential_Tasks_"):
+    elif tcode.startswith("Sequential_Tasks_") and tcode != "Sequential_Tasks_7":
         ev = [{
             "eventCode": "chat_request_send", "timestamp": now_ms, "reportDelay": 0,
             "ideType": "WorkBuddy_MP", "extVersion": "2.2.8", "userId": uid,
@@ -176,7 +171,7 @@ def run_single_safe_task(at: str, uid: str, nick: str, tcode: str, is_mp: bool) 
     return f"pending:{tcode}:{st_now}"
 
 
-def process_account_record(acc: dict, allow_drip: bool = True) -> dict:
+def process_account_record(acc: dict, allow_drip: bool = True, allow_refresh: bool = False) -> dict:
     """Process daily actions for a single CBCN account (checkin, travel, lottery, safe-drip)."""
     at = acc.get("access_token", "")
     rt = acc.get("refresh_token", "")
@@ -190,8 +185,19 @@ def process_account_record(acc: dict, allow_drip: bool = True) -> dict:
         res["status"] = "invalid_token_or_uid"
         return res
 
-    # 1. Check resource snapshot & 11140
+    # 1. Check resource snapshot & 11140 (optional refresh on 401 if allow_refresh=True)
     res_before = get_cbcn_user_resource(at, uid=uid)
+    if not res_before.get("ok") and res_before.get("status") == 401 and allow_refresh and rt:
+        ref = refresh_cbcn_token(rt, access_token=at, uid=uid)
+        if ref.get("ok"):
+            at = ref["access_token"]
+            rt = ref["refresh_token"]
+            acc["access_token"] = at
+            acc["refresh_token"] = rt
+            acc["_refreshed"] = True
+            res["refreshed"] = True
+            res_before = get_cbcn_user_resource(at, uid=uid)
+
     if not res_before.get("ok"):
         if _is_11140(res_before.get("status", 0), res_before.get("msg") or res_before.get("text")):
             res["status"] = "restricted_11140"
@@ -327,7 +333,13 @@ def load_accounts_from_source(source: str, secret: str | None = None, salt: byte
             con.close()
         return accounts
 
-    p = Path(source)
+    raw_path = source
+    if source.startswith("file:"):
+        raw_path = source[len("file:"):]
+    elif source.startswith("dir:"):
+        raw_path = source[len("dir:"):]
+
+    p = Path(raw_path)
     if p.is_file():
         text = p.read_text(encoding="utf-8").strip()
         if text.startswith("["):
@@ -354,7 +366,7 @@ def load_accounts_from_source(source: str, secret: str | None = None, salt: byte
         return accounts
 
     if p.is_dir():
-        for fp_file in p.glob("*.json"):
+        for fp_file in sorted(p.glob("*.json")):
             try:
                 d = json.loads(fp_file.read_text(encoding="utf-8"))
                 if isinstance(d, dict) and (d.get("access_token") or (d.get("auth") or {}).get("accessToken")):
@@ -362,7 +374,7 @@ def load_accounts_from_source(source: str, secret: str | None = None, salt: byte
                     rt = d.get("refresh_token") or (d.get("auth") or {}).get("refreshToken") or ""
                     nick = d.get("nickname") or (d.get("account") or {}).get("nickname") or fp_file.stem
                     uid = d.get("uid") or (d.get("account") or {}).get("uid") or ""
-                    accounts.append({"name": nick, "access_token": at, "refresh_token": rt, "uid": uid})
+                    accounts.append({"name": nick, "access_token": at, "refresh_token": rt, "uid": uid, "created_at": d.get("created_at")})
             except Exception:
                 pass
         return accounts
@@ -382,6 +394,7 @@ def execute_cron_pass(
     secret: str | None = None,
     salt: bytes = DEFAULT_SALT,
     allow_drip: bool = True,
+    allow_refresh: bool = False,
 ) -> dict:
     """Run universal daily cron pass across all resolved CBCN accounts."""
     accounts = load_accounts_from_source(source, secret=secret, salt=salt)
@@ -391,15 +404,22 @@ def execute_cron_pass(
     for i, acc in enumerate(accounts):
         if i > 0:
             time.sleep(random.uniform(4.0, 9.0))
-        r = process_account_record(acc, allow_drip=allow_drip)
+        r = process_account_record(acc, allow_drip=allow_drip, allow_refresh=allow_refresh)
 
-        # Auto-revive quota-exhausted 429 accounts in SQLite if check-in added credits
         if acc.get("source") == "sqlite" and acc.get("id"):
             db_p = acc.get("db_path") or DEFAULT_DB_PATH
             con = sqlite3.connect(str(db_p), timeout=30)
             try:
+                now_iso = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+                if acc.get("_refreshed"):
+                    enc_at = encrypt_field(acc["access_token"], secret=secret, salt=salt)
+                    enc_rt = encrypt_field(acc["refresh_token"], secret=secret, salt=salt)
+                    con.execute(
+                        "UPDATE provider_connections SET access_token=?, refresh_token=?, updated_at=? WHERE id=?",
+                        (enc_at, enc_rt, now_iso, acc["id"]),
+                    )
+                    con.commit()
                 if r.get("status") == "restricted_11140":
-                    now_iso = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
                     con.execute(
                         "UPDATE provider_connections SET test_status='unavailable', error_code='403', last_error='11140 restricted', updated_at=? WHERE id=?",
                         (now_iso, acc["id"]),
@@ -411,7 +431,6 @@ def execute_cron_pass(
                     and acc.get("test_status") == "unavailable"
                     and str(acc.get("error_code") or "") == "429"
                 ):
-                    now_iso = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
                     con.execute(
                         "UPDATE provider_connections SET test_status='active', error_code=NULL, last_error=NULL, rate_limited_until=NULL, updated_at=? WHERE id=?",
                         (now_iso, acc["id"]),
@@ -432,7 +451,6 @@ def execute_cron_pass(
 
 
 def print_crontab_snippet(python_bin: str = sys.executable, source: str = "sqlite") -> None:
-    cli_path = (Path(__file__).resolve().parents[2] / "packages" / "auto_cbcn" / "cli.py").resolve()
     print("# === auto-cbcn universal cronjob (run at 09:15 and 21:15 daily) ===")
     print(f"15 9,21 * * * {python_bin} -m auto_cbcn.cli cron --run --source {source} >> /var/log/auto-cbcn.log 2>&1")
 
@@ -445,6 +463,7 @@ def main(argv=None) -> int:
     ap.add_argument("--interval", type=int, default=43200, help="Daemon sleep interval in seconds (default: 43200 = 12h)")
     ap.add_argument("--print-cron", action="store_true", help="Print crontab configuration line")
     ap.add_argument("--no-drip", action="store_true", help="Skip growth task dripping (run check-in and travel only)")
+    ap.add_argument("--allow-refresh", action="store_true", help="Allow refreshing 401 tokens (only for standalone sources without router auto-refresh)")
     args = ap.parse_args(argv)
 
     if args.print_cron:
@@ -455,13 +474,13 @@ def main(argv=None) -> int:
         print(f"[DAEMON] Starting universal auto-cbcn daemon (interval: {args.interval}s, source: {args.source})", flush=True)
         while True:
             try:
-                res = execute_cron_pass(source=args.source, allow_drip=not args.no_drip)
+                res = execute_cron_pass(source=args.source, allow_drip=not args.no_drip, allow_refresh=args.allow_refresh)
                 print(json.dumps(res, indent=2, ensure_ascii=False), flush=True)
             except Exception as e:
                 print(f"[DAEMON ERROR] {e}", file=sys.stderr, flush=True)
             time.sleep(args.interval)
 
-    res = execute_cron_pass(source=args.source, allow_drip=not args.no_drip)
+    res = execute_cron_pass(source=args.source, allow_drip=not args.no_drip, allow_refresh=args.allow_refresh)
     print(json.dumps(res, indent=2, ensure_ascii=False))
     return 0
 

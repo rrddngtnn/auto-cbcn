@@ -2,9 +2,11 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import os
 import sys
+import time
 
 from .cron import execute_cron_pass, print_crontab_snippet
 from .engine import register_cbcn
@@ -15,11 +17,10 @@ from .harvester import (
     get_cbcn_user_resource,
     harvest_cbcn_all,
     harvest_cbcn_safe,
-    install_cbcn_to_db,
     poll_cbcn_cli_token,
 )
-from .solver import EjiemaSmsClient, FeihuSmsClient, probe_cbcn_inference
-from .store import DEFAULT_DB_PATH, DEFAULT_ROUTER_URL, dispatch_credential_sink, load_dotenv_file
+from .solver import EjiemaSmsClient, FeihuSmsClient, HaomadunSmsClient, probe_cbcn_inference
+from .store import dispatch_credential_sink, load_dotenv_file
 
 
 def cmd_doctor(_args) -> None:
@@ -50,6 +51,15 @@ def cmd_doctor(_args) -> None:
         except Exception:
             pass
 
+    haomadun_key = os.environ.get("HAOMADUN_API_KEY", "")
+    haomadun_ok = False
+    if haomadun_key:
+        try:
+            hm = HaomadunSmsClient()
+            haomadun_ok = hm._req("GET", "/me").get("code") == 0
+        except Exception:
+            pass
+
     doc = {
         "ok": True,
         "environment": {
@@ -58,10 +68,12 @@ def cmd_doctor(_args) -> None:
             "router_url": os.environ.get("ROUTER_URL", "http://127.0.0.1:20128"),
             "router_db_path": os.environ.get("ROUTER_DB_PATH", "./storage.sqlite"),
             "proxy_configured": bool(os.environ.get("CBCN_PROXY_URL") or os.environ.get("PROXY_TEMPLATE")),
+            "camoufox_installed": importlib.util.find_spec("camoufox") is not None,
         },
         "providers": {
             "feihu": {"configured": bool(feihu_user and feihu_key), "connected": feihu_ok, "balance_rmb": feihu_bal},
             "ejiema": {"configured": bool(ejiema_tok), "connected": ejiema_ok, "balance": ejiema_bal},
+            "haomadun": {"configured": bool(haomadun_key), "connected": haomadun_ok},
         },
         "ledger": summarize(),
     }
@@ -116,6 +128,10 @@ def cmd_register(args) -> None:
         area_code=args.area_code,
         isp=args.isp or None,
         proxy_country=args.proxy_country,
+        sms_provider=args.sms_provider,
+        sms_keyword=args.sms_keyword,
+        channel_uid=args.channel_uid,
+        fresh_only=args.fresh_only,
         block_bind=args.block_bind,
         precheck=not args.no_precheck,
         safe_harvest=not args.all_harvest,
@@ -137,12 +153,12 @@ def cmd_cron(args) -> None:
         print(f"[DAEMON] Starting universal auto-cbcn cron daemon (interval: {args.interval}s, source: {args.source})", flush=True)
         while True:
             try:
-                res = execute_cron_pass(source=args.source, allow_drip=not args.no_drip)
+                res = execute_cron_pass(source=args.source, allow_drip=not args.no_drip, allow_refresh=args.allow_refresh)
                 print(json.dumps(res, indent=2, ensure_ascii=False), flush=True)
             except Exception as e:
                 print(f"[DAEMON ERROR] {e}", file=sys.stderr, flush=True)
             time.sleep(args.interval)
-    res = execute_cron_pass(source=args.source, allow_drip=not args.no_drip)
+    res = execute_cron_pass(source=args.source, allow_drip=not args.no_drip, allow_refresh=args.allow_refresh)
     print(json.dumps(res, indent=2, ensure_ascii=False))
 
 
@@ -172,7 +188,11 @@ def main(argv=None) -> int:
     s_harv.set_defaults(func=cmd_harvest)
 
     s_reg = sub.add_parser("register", help="Run automated browser registration, captcha solving, and harvest")
-    s_reg.add_argument("--pid", type=int, default=11751, help="Feihu project ID (e.g. 11751, 10532, 2472)")
+    s_reg.add_argument("--sms-provider", default="feihu", choices=["feihu", "ejiema", "haomadun"], help="BYOP SMS provider adapter")
+    s_reg.add_argument("--sms-keyword", default="腾讯科技", help="Keyword for Ejiema SMS adapter")
+    s_reg.add_argument("--channel-uid", default="21986-HBY3OAE45E", help="Channel UID for Haomadun SMS adapter")
+    s_reg.add_argument("--fresh-only", action="store_true", help="Skip numbers with non-empty last_event_time (Feihu)")
+    s_reg.add_argument("--pid", type=int, default=11751, help="Feihu/Haomadun project ID (e.g. 11751, 10532, 2472)")
     s_reg.add_argument("--mode", type=int, default=2, help="SMS mode: 1 (public pool) or 2 (connect code / 专属)")
     s_reg.add_argument("--area-code", default="+86", help="Phone area code (+86 or +852)")
     s_reg.add_argument("--isp", default="", help="ISP filter (e.g. 中国电信, 中国移动, 中国联通)")
@@ -195,6 +215,7 @@ def main(argv=None) -> int:
     s_cron.add_argument("--interval", type=int, default=43200, help="Daemon interval in seconds (default: 43200 = 12h)")
     s_cron.add_argument("--print-cron", action="store_true", help="Print crontab configuration line")
     s_cron.add_argument("--no-drip", action="store_true", help="Skip growth task dripping (run checkin and travel only)")
+    s_cron.add_argument("--allow-refresh", action="store_true", help="Allow refreshing 401 tokens (only for standalone sources without router auto-refresh)")
     s_cron.set_defaults(func=cmd_cron)
 
     args = p.parse_args(argv)

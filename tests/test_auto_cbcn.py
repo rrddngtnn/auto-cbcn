@@ -120,6 +120,63 @@ def test_fingerprint_heuristics():
         assert len(s["bad_prefixes"]) == 1
 
 
+def test_http_sink_and_sms_factory():
+    from unittest.mock import patch, MagicMock
+    from auto_cbcn.solver import build_sms_client
+    from auto_cbcn.store import exchange_cbcn_http
+
+    assert isinstance(build_sms_client("feihu"), FeihuSmsClient)
+    assert isinstance(build_sms_client("ejiema"), EjiemaSmsClient)
+    assert isinstance(build_sms_client("haomadun"), HaomadunSmsClient)
+
+    b = CredentialBundle(
+        name="CBCN-Test",
+        phone="18049045741",
+        uid="uid-12345",
+        access_token="at-test-value",
+        refresh_token="rt-test-value",
+        expires_in=86400,
+        remaining_credits=2100.0,
+    )
+    mock_resp = MagicMock(status_code=200, ok=True)
+    mock_resp.json.return_value = {"imported": 1}
+    with patch("auto_cbcn.store.requests.Session.post", return_value=mock_resp) as m_post:
+        res = exchange_cbcn_http(b, router_url="http://127.0.0.1:20128", api_key="k1")
+        assert res == {"imported": 1}
+        called_url = m_post.call_args[0][0]
+        called_json = m_post.call_args[1]["json"]
+        assert called_url.endswith("/api/connections/import")
+        assert called_json["provider"] == "codebuddy-cn"
+        assert called_json["accounts"][0]["accessToken"] == "at-test-value"
+
+
+def test_cron_file_prefix_and_refresh_contract():
+    from unittest.mock import patch, MagicMock
+    from auto_cbcn.cron import process_account_record
+
+    with tempfile.TemporaryDirectory() as td:
+        fp = Path(td) / "accounts.jsonl"
+        fp.write_text(json.dumps({"name": "acc1", "access_token": "at1", "refresh_token": "rt1"}) + "\n", encoding="utf-8")
+        accs = load_accounts_from_source(f"file:{fp}")
+        assert len(accs) == 1
+        assert accs[0]["access_token"] == "at1"
+
+    with patch("auto_cbcn.cron.get_cbcn_user_resource") as m_res, patch("auto_cbcn.cron.refresh_cbcn_token") as m_ref, patch("auto_cbcn.cron.requests.post") as m_post, patch("auto_cbcn.cron.requests.get") as m_get:
+        m_res.side_effect = [
+            {"ok": False, "status": 401},
+            {"ok": True, "remaining_credits": 500.0, "total_credits": 500.0, "pack_count": 1},
+            {"ok": True, "remaining_credits": 600.0, "total_credits": 600.0, "pack_count": 1},
+        ]
+        m_ref.return_value = {"ok": True, "access_token": "at2", "refresh_token": "rt2", "expires_in": 3600}
+        m_post.return_value = MagicMock(status_code=200, ok=True, json=lambda: {"code": 0, "data": {"credits": 100}})
+        m_get.return_value = MagicMock(status_code=200, ok=True, json=lambda: {"code": 0, "data": {}})
+        acc = {"name": "a1", "uid": "u1", "access_token": "at1", "refresh_token": "rt1"}
+        out = process_account_record(acc, allow_drip=False, allow_refresh=True)
+        assert out["refreshed"] is True
+        assert acc["access_token"] == "at2"
+        assert acc["refresh_token"] == "rt2"
+
+
 def test_proxy_config_resolver():
     cfg = resolve_proxy_playwright_cfg("http://u1:p1@127.0.0.1:10080")
     assert cfg == {"server": "http://127.0.0.1:10080", "username": "u1", "password": "p1"}
