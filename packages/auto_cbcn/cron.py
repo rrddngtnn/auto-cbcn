@@ -1,0 +1,470 @@
+"""cron.py — Universal daily check-in, streak keeper, cat travel, and task drip scheduler.
+
+Supports multiple account sources:
+  - SQLite database (StyxRouter, OmniRoute, or custom schema with provider_connections)
+  - Credential files (JSON list or JSONL)
+  - Directory of account files (e.g. auths/workbuddy-*.json)
+  - Environment variables (CBCN_TOKENS=phone:at:rt)
+
+Works cross-platform without requiring StyxRouter or any specific daemon.
+"""
+from __future__ import annotations
+
+import argparse
+import base64
+import datetime
+import json
+import os
+from pathlib import Path
+import random
+import sqlite3
+import subprocess
+import sys
+import time
+import urllib.parse
+import uuid
+import requests
+
+from .fingerprint import is_recycled_suspect
+from .harvester import (
+    BILLING_BASE_CN,
+    CHAT_BASE_CN,
+    MP_TASK_CODES,
+    WEB_BASE_CN,
+    _billing_headers,
+    _derive_id,
+    accept_growth_tasks,
+    claim_task_reward,
+    get_cbcn_user_resource,
+    list_growth_tasks,
+)
+from .solver import human_drag
+from .store import (
+    DEFAULT_DB_PATH,
+    DEFAULT_SALT,
+    CredentialBundle,
+    decrypt_field,
+    dispatch_credential_sink,
+    encrypt_field,
+    load_dotenv_file,
+    resolve_secret,
+)
+
+load_dotenv_file()
+
+SAFE_DRIP_TASKS = [
+    "first_buddy",
+    "Library_read",
+    "playbook_prompt",
+    "Buddy_App",
+    "RichMeow_Chat",
+    "chat_5",
+    "Sequential_Tasks_1",
+    "Sequential_Tasks_2",
+    "Sequential_Tasks_3",
+    "Sequential_Tasks_4",
+    "Sequential_Tasks_5",
+    "Sequential_Tasks_6",
+    "Sequential_Tasks_7",
+]
+
+
+def _jwt_claims(tok: str) -> dict:
+    try:
+        p = tok.split(".")[1]
+        p += "=" * (-len(p) % 4)
+        return json.loads(base64.urlsafe_b64decode(p))
+    except Exception:
+        return {}
+
+
+def _is_11140(code: int, body: dict | str | None) -> bool:
+    if isinstance(body, dict):
+        c = body.get("code")
+        s = json.dumps(body, ensure_ascii=False)
+        return c == 11140 or (code == 403 and "账号存在异常行为" in s)
+    t = str(body or "")
+    return code == 403 and ("11140" in t or "账号存在异常行为" in t)
+
+
+def run_single_safe_task(at: str, uid: str, nick: str, tcode: str, is_mp: bool) -> str:
+    """Execute 1 safe growth task using official bare-array payload structure."""
+    accept_growth_tasks(at, [tcode], uid=uid, mp=is_mp)
+    time.sleep(1.5)
+    now_ms = int(time.time() * 1000)
+    rid = uuid.uuid4().hex
+    cid = uuid.uuid4().hex
+    fp = {
+        "timezone": "Asia/Shanghai",
+        "reportDelay": 2000,
+        "userId": uid,
+        "username": nick or uid,
+        "userNickname": nick or uid,
+        "product": "SaaS",
+        "releaseDate": 1789036585355,
+        "commit": "5f9692923c93033111c51ad7b003eb80204a9b75",
+        "ideName": "WorkBuddy",
+        "ideType": "WorkBuddy",
+        "ideVersion": "5.9.3",
+        "machineId": _derive_id(uid or "anon", "machine"),
+        "sessionId": _derive_id(uid or "anon", "session"),
+        "extName": "workbuddy-desktop",
+        "extVersion": "5.9.3",
+        "os": "win32",
+        "arch": "x64",
+        "osVersion": "10.0.26220",
+        "cpuCores": 20,
+        "memorySize": 24,
+        "timestamp": now_ms,
+        "presentAt": now_ms,
+    }
+
+    if tcode == "first_buddy":
+        ev = [{**fp, "eventCode": "chat_request_send", "conversationId": cid, "requestId": rid, "inputLength": 16, "mode": "craft", "agentName": "cli", "agentType": "main", "rootRequestId": rid, "parentConversationId": cid}]
+        requests.post(f"{CHAT_BASE_CN}/v2/report", json=ev, headers=_billing_headers(at, uid), timeout=15)
+        time.sleep(2.0)
+        requests.post(f"{CHAT_BASE_CN}/activity/growth/buddy/agreement", json={}, headers=_billing_headers(at, uid), timeout=12)
+        time.sleep(1.0)
+        requests.post(f"{CHAT_BASE_CN}/activity/growth/buddy/first", json={}, headers=_billing_headers(at, uid), timeout=12)
+    elif tcode == "Library_read":
+        doc_url = "https://www.workbuddy.cn/space/d/o0KWYeynteVv06UnAZqIFm"
+        ev = [{
+            "eventCode": "web_element_click", "timestamp": now_ms, "reportDelay": 0, "pageURL": doc_url,
+            "elementId": "library_doc_intro_click", "elementName": "WorkBuddy资料库介绍",
+            "os": "Win32", "arch": "", "osVersion": "10.0", "userAgent": "Mozilla/5.0",
+            "machineId": _derive_id(uid or "anon", "webmachine"), "userId": uid, "userNickname": nick or uid, "enterpriseId": "",
+        }]
+        requests.post(f"{WEB_BASE_CN}/v2/report", json=ev, headers=_billing_headers(at, uid, {"x-client-platform": "web", "Origin": WEB_BASE_CN, "Referer": doc_url}), timeout=15)
+    elif tcode == "playbook_prompt":
+        evs = [
+            {**fp, "eventCode": "playbook_cta_click", "playbookId": "pb_1", "playbookTitle": "灵感案例"},
+            {**fp, "eventCode": "playbook_prompt_send", "playbookId": "pb_1", "playbookTitle": "灵感案例", "promptLength": 18},
+        ]
+        requests.post(f"{CHAT_BASE_CN}/v2/report", json=evs, headers=_billing_headers(at, uid), timeout=15)
+    elif tcode == "Buddy_App":
+        evs = [
+            {**fp, "eventCode": "buddyapp_enter_click", "from": "sidebar", "isFirstPage": True},
+            {**fp, "eventCode": "buddyapp_tab_click", "tab": "all"},
+            {**fp, "eventCode": "buddyapp_detail_view", "appId": "app_1"},
+            {**fp, "eventCode": "buddyapp_use_click", "appId": "app_1"},
+            {**fp, "eventCode": "buddyapp_launch_success", "appId": "app_1"},
+        ]
+        requests.post(f"{CHAT_BASE_CN}/v2/report", json=evs, headers=_billing_headers(at, uid), timeout=15)
+    elif tcode in ("RichMeow_Chat", "chat_5"):
+        n = 5 if tcode == "chat_5" else 1
+        for i in range(n):
+            ev = [{**fp, "eventCode": "chat_request_send", "conversationId": cid, "requestId": f"{rid}{i}", "inputLength": 18, "mode": "craft", "agentName": "cli", "agentType": "main", "rootRequestId": f"{rid}{i}", "parentConversationId": cid}]
+            requests.post(f"{CHAT_BASE_CN}/v2/report", json=ev, headers=_billing_headers(at, uid), timeout=15)
+            time.sleep(2.0 if n > 1 else 0.5)
+    elif tcode.startswith("Sequential_Tasks_"):
+        ev = [{
+            "eventCode": "chat_request_send", "timestamp": now_ms, "reportDelay": 0,
+            "ideType": "WorkBuddy_MP", "extVersion": "2.2.8", "userId": uid,
+            "userNickname": nick or uid, "machineId": _derive_id(uid or "anon", "mpmachine"),
+            "inputLength": 14, "conversationId": cid, "rootRequestId": rid, "parentConversationId": cid,
+            "agentName": "mp", "agentType": "main",
+        }]
+        requests.post(f"{BILLING_BASE_CN}/v2/report", json=ev, headers=_billing_headers(at, uid, {"X-Client-Platform": "mp-weixin", "X-Client-Product": "workbuddy-mp"}), timeout=15)
+
+    time.sleep(3.0)
+    after = list_growth_tasks(at, uid=uid, mp=is_mp)
+    matched = [t for t in after if t.get("task_code") == tcode]
+    if matched and matched[0].get("accept_status") == "completed":
+        c = claim_task_reward(at, tcode, uid=uid, mp=is_mp)
+        return f"claimed:{tcode}:{c.get('code')}"
+    st_now = matched[0].get("accept_status") if matched else "missing"
+    return f"pending:{tcode}:{st_now}"
+
+
+def process_account_record(acc: dict, allow_drip: bool = True) -> dict:
+    """Process daily actions for a single CBCN account (checkin, travel, lottery, safe-drip)."""
+    at = acc.get("access_token", "")
+    rt = acc.get("refresh_token", "")
+    name = acc.get("name") or acc.get("phone") or "CBCN-Account"
+    claims = _jwt_claims(at)
+    uid = str(claims.get("sub") or claims.get("userId") or acc.get("uid") or "")
+    nick = str(claims.get("preferred_username") or claims.get("nickname") or acc.get("nickname") or name)
+
+    res: dict = {"name": name, "uid": uid[:8] if uid else "unknown"}
+    if not at or not uid:
+        res["status"] = "invalid_token_or_uid"
+        return res
+
+    # 1. Check resource snapshot & 11140
+    res_before = get_cbcn_user_resource(at, uid=uid)
+    if not res_before.get("ok"):
+        if _is_11140(res_before.get("status", 0), res_before.get("msg") or res_before.get("text")):
+            res["status"] = "restricted_11140"
+            return res
+        res["status"] = f"error_{res_before.get('status')}"
+        return res
+
+    res["credits_before"] = res_before.get("remaining_credits", 0.0)
+
+    # 2. Daily checkin (+100 credits)
+    try:
+        r_chk = requests.post(f"{BILLING_BASE_CN}/v2/billing/meter/daily-checkin", json={}, headers=_billing_headers(at, uid), timeout=12)
+        cj = r_chk.json() if r_chk.headers.get("content-type", "").startswith("application/json") else {}
+        res["checkin"] = cj.get("msg") or cj.get("code") or r_chk.status_code
+        if _is_11140(r_chk.status_code, cj):
+            res["status"] = "restricted_11140"
+            return res
+    except Exception as e:
+        res["checkin"] = str(e)[:60]
+    time.sleep(1.5)
+
+    # 3. Streak & Lottery
+    try:
+        rs = requests.get(f"{CHAT_BASE_CN}/activity/growth/streak", headers=_billing_headers(at, uid), timeout=12).json()
+        rstat = (rs.get("data") or {}).get("redemption_status") or {}
+        for tier in ("7d", "14d", "28d"):
+            if rstat.get(f"tier_{tier}_status") == "unlocked":
+                requests.post(f"{CHAT_BASE_CN}/activity/growth/redeem", json={"tier": tier, "client_token": str(uuid.uuid4())}, headers=_billing_headers(at, uid), timeout=12)
+                res.setdefault("redeemed", []).append(tier)
+                time.sleep(1.2)
+    except Exception:
+        pass
+
+    try:
+        rl = requests.get(f"{CHAT_BASE_CN}/activity/growth/lottery/summary", headers=_billing_headers(at, uid), timeout=12).json()
+        chances = int((rl.get("data") or {}).get("chances") or 0)
+        for _ in range(min(chances, 3)):
+            requests.post(f"{CHAT_BASE_CN}/activity/growth/lottery/draw", json={"client_token": str(uuid.uuid4())}, headers=_billing_headers(at, uid), timeout=12)
+            res["lottery_draws"] = res.get("lottery_draws", 0) + 1
+            time.sleep(1.2)
+    except Exception:
+        pass
+
+    # 4. Buddy Cat Travel
+    try:
+        bi = requests.get(f"{CHAT_BASE_CN}/activity/growth/buddy/info", headers=_billing_headers(at, uid), timeout=12).json()
+        if (bi.get("data") or {}).get("buddy"):
+            ts = requests.get(f"{CHAT_BASE_CN}/activity/growth/buddy/travel/status", headers=_billing_headers(at, uid), timeout=12).json().get("data") or {}
+            if ts.get("state") == "arrived" and ts.get("record_id"):
+                requests.post(f"{CHAT_BASE_CN}/activity/growth/buddy/travel/claim", json={"record_id": ts["record_id"]}, headers=_billing_headers(at, uid), timeout=12)
+                res["travel"] = "claimed"
+                time.sleep(1.5)
+                ts = requests.get(f"{CHAT_BASE_CN}/activity/growth/buddy/travel/status", headers=_billing_headers(at, uid), timeout=12).json().get("data") or {}
+            if ts.get("state") == "idle" and not ts.get("daily_limit_reached"):
+                requests.post(f"{CHAT_BASE_CN}/activity/growth/buddy/travel/depart", json={"location_id": random.randint(1, 4)}, headers=_billing_headers(at, uid), timeout=12)
+                res["travel"] = res.get("travel", "") + "+departed"
+    except Exception:
+        pass
+
+    # 5. Safe Drip Growth Task (if account age >= 24h)
+    age_hours = 999.0
+    if acc.get("created_at"):
+        try:
+            c_dt = datetime.datetime.fromisoformat(str(acc["created_at"]).replace("Z", "+00:00"))
+            age_hours = (datetime.datetime.now(datetime.timezone.utc) - c_dt).total_seconds() / 3600.0
+        except Exception:
+            pass
+
+    if allow_drip and age_hours >= 24.0:
+        std = list_growth_tasks(at, uid=uid, mp=False)
+        mp = list_growth_tasks(at, uid=uid, mp=True)
+        by_code = {t["task_code"]: (t, False) for t in std if t.get("task_code")}
+        for t in mp:
+            tc = t.get("task_code")
+            if tc and tc not in by_code:
+                by_code[tc] = (t, tc in MP_TASK_CODES)
+
+        for tc in SAFE_DRIP_TASKS:
+            if tc not in by_code:
+                continue
+            t, is_mp = by_code[tc]
+            if t.get("locked") or t.get("accept_status") == "claimed":
+                continue
+            if t.get("accept_status") == "completed":
+                c = claim_task_reward(at, tc, uid=uid, mp=is_mp)
+                res["drip_task"] = f"claimed_existing:{tc}:{c.get('code')}"
+            else:
+                res["drip_task"] = run_single_safe_task(at, uid, nick, tc, is_mp)
+            break
+    elif age_hours < 24.0:
+        res["drip_task"] = f"quiet_period_skip({age_hours:.1f}h<24h)"
+
+    res_after = get_cbcn_user_resource(at, uid=uid)
+    res["credits_after"] = res_after.get("remaining_credits", res.get("credits_before", 0.0))
+    res["status"] = "ok"
+    return res
+
+
+def load_accounts_from_source(source: str, secret: str | None = None, salt: bytes = DEFAULT_SALT) -> list[dict]:
+    """Universal account loader from SQLite, file (JSON/JSONL), directory, or env."""
+    accounts = []
+    if source.startswith("sqlite:") or (source == "sqlite") or Path(source).suffix in (".sqlite", ".db"):
+        db_path = Path(source[len("sqlite:"):]) if source.startswith("sqlite:") else Path(source if source != "sqlite" else DEFAULT_DB_PATH)
+        if not db_path.is_file():
+            return []
+        con = sqlite3.connect(str(db_path), timeout=30)
+        con.row_factory = sqlite3.Row
+        try:
+            sec = resolve_secret(secret)
+            rows = con.execute(
+                "SELECT id, name, access_token, refresh_token, created_at, is_active, test_status, error_code, last_error "
+                "FROM provider_connections WHERE provider='codebuddy-cn'"
+            ).fetchall()
+            for r in rows:
+                if not r["is_active"]:
+                    continue
+                if str(r["error_code"] or "") == "403" or "11140" in str(r["last_error"] or ""):
+                    continue
+                at = decrypt_field(r["access_token"], secret=sec, salt=salt)
+                rt = decrypt_field(r["refresh_token"], secret=sec, salt=salt)
+                accounts.append({
+                    "id": r["id"],
+                    "name": r["name"],
+                    "access_token": at,
+                    "refresh_token": rt,
+                    "created_at": r["created_at"],
+                    "test_status": r["test_status"],
+                    "error_code": r["error_code"],
+                    "source": "sqlite",
+                    "db_path": str(db_path),
+                })
+        finally:
+            con.close()
+        return accounts
+
+    p = Path(source)
+    if p.is_file():
+        text = p.read_text(encoding="utf-8").strip()
+        if text.startswith("["):
+            data = json.loads(text)
+            for item in data:
+                if isinstance(item, dict) and item.get("access_token"):
+                    accounts.append(item)
+        else:
+            for line in text.splitlines():
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                if line.startswith("{"):
+                    try:
+                        accounts.append(json.loads(line))
+                    except Exception:
+                        pass
+                elif ":" in line:
+                    parts = line.split(":")
+                    if len(parts) >= 3:
+                        accounts.append({"phone": parts[0], "access_token": parts[1], "refresh_token": parts[2]})
+                    elif len(parts) == 2:
+                        accounts.append({"name": parts[0], "access_token": parts[1]})
+        return accounts
+
+    if p.is_dir():
+        for fp_file in p.glob("*.json"):
+            try:
+                d = json.loads(fp_file.read_text(encoding="utf-8"))
+                if isinstance(d, dict) and (d.get("access_token") or (d.get("auth") or {}).get("accessToken")):
+                    at = d.get("access_token") or d["auth"]["accessToken"]
+                    rt = d.get("refresh_token") or (d.get("auth") or {}).get("refreshToken") or ""
+                    nick = d.get("nickname") or (d.get("account") or {}).get("nickname") or fp_file.stem
+                    uid = d.get("uid") or (d.get("account") or {}).get("uid") or ""
+                    accounts.append({"name": nick, "access_token": at, "refresh_token": rt, "uid": uid})
+            except Exception:
+                pass
+        return accounts
+
+    raw_env = os.environ.get("CBCN_TOKENS", "").strip()
+    if raw_env:
+        for line in raw_env.splitlines():
+            line = line.strip()
+            if ":" in line:
+                parts = line.split(":")
+                accounts.append({"phone": parts[0], "access_token": parts[1], "refresh_token": parts[2] if len(parts) > 2 else ""})
+    return accounts
+
+
+def execute_cron_pass(
+    source: str = "sqlite",
+    secret: str | None = None,
+    salt: bytes = DEFAULT_SALT,
+    allow_drip: bool = True,
+) -> dict:
+    """Run universal daily cron pass across all resolved CBCN accounts."""
+    accounts = load_accounts_from_source(source, secret=secret, salt=salt)
+    results = []
+    ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    for i, acc in enumerate(accounts):
+        if i > 0:
+            time.sleep(random.uniform(4.0, 9.0))
+        r = process_account_record(acc, allow_drip=allow_drip)
+
+        # Auto-revive quota-exhausted 429 accounts in SQLite if check-in added credits
+        if acc.get("source") == "sqlite" and acc.get("id"):
+            db_p = acc.get("db_path") or DEFAULT_DB_PATH
+            con = sqlite3.connect(str(db_p), timeout=30)
+            try:
+                if r.get("status") == "restricted_11140":
+                    now_iso = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+                    con.execute(
+                        "UPDATE provider_connections SET test_status='unavailable', error_code='403', last_error='11140 restricted', updated_at=? WHERE id=?",
+                        (now_iso, acc["id"]),
+                    )
+                    con.commit()
+                elif (
+                    r.get("status") == "ok"
+                    and float(r.get("credits_after", 0)) > 0
+                    and acc.get("test_status") == "unavailable"
+                    and str(acc.get("error_code") or "") == "429"
+                ):
+                    now_iso = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+                    con.execute(
+                        "UPDATE provider_connections SET test_status='active', error_code=NULL, last_error=NULL, rate_limited_until=NULL, updated_at=? WHERE id=?",
+                        (now_iso, acc["id"]),
+                    )
+                    con.commit()
+                    r["revived_in_db"] = True
+            finally:
+                con.close()
+
+        results.append(r)
+
+    return {
+        "timestamp": ts,
+        "source": source,
+        "scanned": len(accounts),
+        "results": results,
+    }
+
+
+def print_crontab_snippet(python_bin: str = sys.executable, source: str = "sqlite") -> None:
+    cli_path = (Path(__file__).resolve().parents[2] / "packages" / "auto_cbcn" / "cli.py").resolve()
+    print("# === auto-cbcn universal cronjob (run at 09:15 and 21:15 daily) ===")
+    print(f"15 9,21 * * * {python_bin} -m auto_cbcn.cli cron --run --source {source} >> /var/log/auto-cbcn.log 2>&1")
+
+
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser(prog="auto-cbcn cron", description="Universal CBCN Daily Maintenance Scheduler")
+    ap.add_argument("--source", default="sqlite", help="Account source: sqlite, sqlite:<path>, file:<path>, or dir:<path>")
+    ap.add_argument("--run", action="store_true", help="Execute single cron pass immediately")
+    ap.add_argument("--daemon", action="store_true", help="Run indefinitely in background daemon mode")
+    ap.add_argument("--interval", type=int, default=43200, help="Daemon sleep interval in seconds (default: 43200 = 12h)")
+    ap.add_argument("--print-cron", action="store_true", help="Print crontab configuration line")
+    ap.add_argument("--no-drip", action="store_true", help="Skip growth task dripping (run check-in and travel only)")
+    args = ap.parse_args(argv)
+
+    if args.print_cron:
+        print_crontab_snippet(source=args.source)
+        return 0
+
+    if args.daemon:
+        print(f"[DAEMON] Starting universal auto-cbcn daemon (interval: {args.interval}s, source: {args.source})", flush=True)
+        while True:
+            try:
+                res = execute_cron_pass(source=args.source, allow_drip=not args.no_drip)
+                print(json.dumps(res, indent=2, ensure_ascii=False), flush=True)
+            except Exception as e:
+                print(f"[DAEMON ERROR] {e}", file=sys.stderr, flush=True)
+            time.sleep(args.interval)
+
+    res = execute_cron_pass(source=args.source, allow_drip=not args.no_drip)
+    print(json.dumps(res, indent=2, ensure_ascii=False))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
