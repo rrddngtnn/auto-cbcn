@@ -185,6 +185,14 @@ def test_proxy_config_resolver():
     cfg2 = resolve_proxy_playwright_cfg("http://127.0.0.1:8080")
     assert cfg2 == {"server": "http://127.0.0.1:8080"}
 
+    assert resolve_proxy_playwright_cfg("direct") is None
+    assert resolve_proxy_playwright_cfg("") is None
+
+    from auto_cbcn.cron import _http_proxies
+    assert _http_proxies("none", session_key="u1") is None
+    p = _http_proxies("http://user-{session}:pass@proxy.example:{port}", session_key="uid-123")
+    assert p is not None and "{session}" not in p["https"] and "{port}" not in p["https"]
+
 
 def test_cron_loader_contracts():
     with tempfile.TemporaryDirectory() as td:

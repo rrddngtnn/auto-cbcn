@@ -200,8 +200,21 @@ def _http_proxies(proxy_url: str | None = None, session_key: str = "") -> dict[s
             raw = tpl.format(user=base_u, password=pwd, host=host, port=port, country=country, ttl=30)
     if not raw:
         return None
+    if raw.lower() in ("none", "direct", "off", "false"):
+        return None
     if "://" not in raw:
         raw = f"http://{raw}"
+    if "{session}" in raw or "{port}" in raw:
+        pmin = int(os.environ.get("PROXY_PORT_MIN", "10000"))
+        pmax = int(os.environ.get("PROXY_PORT_MAX", "29999"))
+        if session_key:
+            h = int(hashlib.md5(session_key.encode("utf-8")).hexdigest()[:8], 16)
+            port = pmin + (h % max(1, (pmax - pmin + 1)))
+            sid = hashlib.md5(session_key.encode("utf-8")).hexdigest()[:10]
+        else:
+            port = random.randint(pmin, pmax)
+            sid = uuid.uuid4().hex[:10]
+        raw = raw.replace("{port}", str(port)).replace("{session}", sid)
     return {"http": raw, "https": raw}
 
 

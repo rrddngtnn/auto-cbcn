@@ -428,8 +428,14 @@ def resolve_proxy_playwright_cfg(proxy_url: str | None = None, country: str = "h
             port = random.randint(pmin, pmax)
             base_u = user.split(";")[0].split("__")[0]
             raw = tpl.format(user=base_u, password=pwd, host=host, port=port, country=country, ttl=30)
-    if not raw:
+    if not raw or raw.lower() in ("none", "direct", "off", "false"):
         return None
+    if "{session}" in raw or "{port}" in raw:
+        pmin = int(os.environ.get("PROXY_PORT_MIN", "10000"))
+        pmax = int(os.environ.get("PROXY_PORT_MAX", "29999"))
+        port = random.randint(pmin, pmax)
+        sid = os.urandom(5).hex()
+        raw = raw.replace("{port}", str(port)).replace("{session}", sid)
     u = urllib.parse.urlparse(raw if "://" in raw else f"http://{raw}")
     cfg = {"server": f"{u.scheme}://{u.hostname}:{u.port}"}
     if u.username:
