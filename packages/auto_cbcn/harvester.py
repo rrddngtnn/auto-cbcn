@@ -169,8 +169,9 @@ def _billing_headers(access_token: str, uid: str = "", extra: dict | None = None
     return h
 
 
-def get_cbcn_user_resource(access_token: str, uid: str = "") -> dict:
+def get_cbcn_user_resource(access_token: str, uid: str = "", session: requests.Session | None = None) -> dict:
     """Fetch user active package summary from /v2/billing/meter/get-user-resource."""
+    req = session or requests
     now = datetime.datetime.now()
     payload = {
         "PageNumber": 1,
@@ -180,7 +181,7 @@ def get_cbcn_user_resource(access_token: str, uid: str = "") -> dict:
         "PackageEndTimeRangeBegin": now.strftime("%Y-%m-%d %H:%M:%S"),
         "PackageEndTimeRangeEnd": (now + datetime.timedelta(days=3650)).strftime("%Y-%m-%d %H:%M:%S"),
     }
-    r = requests.post(
+    r = req.post(
         f"{CHAT_BASE_CN}/v2/billing/meter/get-user-resource",
         json=payload,
         headers=_billing_headers(access_token, uid),
@@ -238,48 +239,52 @@ def harvest_cbcn_safe(access_token: str, uid: str = "") -> dict:
     return {"steps": log_steps, "resource": resource}
 
 
-def list_growth_tasks(access_token: str, uid: str = "", mp: bool = False) -> list[dict]:
+def list_growth_tasks(access_token: str, uid: str = "", mp: bool = False, session: requests.Session | None = None) -> list[dict]:
+    req = session or requests
     hdr = _billing_headers(access_token, uid)
     if mp:
         hdr["X-Client-Platform"] = "miniprogram"
-    r = requests.get(f"{CHAT_BASE_CN}/v2/activity/growth/tasks", headers=hdr, timeout=12)
+    r = req.get(f"{CHAT_BASE_CN}/v2/activity/growth/tasks", headers=hdr, timeout=12)
     if not r.ok:
         return []
     data = (r.json().get("data") or {}) if isinstance(r.json(), dict) else {}
     return data.get("tasks") or []
 
 
-def accept_growth_tasks(access_token: str, task_codes: list[str], uid: str = "", mp: bool = False) -> dict:
+def accept_growth_tasks(access_token: str, task_codes: list[str], uid: str = "", mp: bool = False, session: requests.Session | None = None) -> dict:
+    req = session or requests
     hdr = _billing_headers(access_token, uid)
     if mp:
         hdr["X-Client-Platform"] = "miniprogram"
-    r = requests.post(f"{CHAT_BASE_CN}/v2/activity/growth/tasks/accept", json={"task_codes": task_codes}, headers=hdr, timeout=12)
+    r = req.post(f"{CHAT_BASE_CN}/v2/activity/growth/tasks/accept", json={"task_codes": task_codes}, headers=hdr, timeout=12)
     try:
         return r.json()
     except Exception:
         return {"status": r.status_code}
 
 
-def claim_task_reward(access_token: str, task_code: str, uid: str = "", mp: bool = False) -> dict:
+def claim_task_reward(access_token: str, task_code: str, uid: str = "", mp: bool = False, session: requests.Session | None = None) -> dict:
+    req = session or requests
     escaped = urllib.parse.quote(task_code, safe="")
     if mp:
         hdr = _billing_headers(access_token, uid, extra={"X-Client-Platform": "miniprogram"})
-        r = requests.post(f"{CHAT_BASE_CN}/activity/growth/tasks/{escaped}/claim", headers=hdr, timeout=12)
+        r = req.post(f"{CHAT_BASE_CN}/activity/growth/tasks/{escaped}/claim", headers=hdr, timeout=12)
         if r.ok:
             try:
                 return r.json()
             except Exception:
                 pass
     hdr_web = _billing_headers(access_token, uid, extra={"x-client-platform": "web", "Origin": WEB_BASE_CN, "Referer": f"{WEB_BASE_CN}/"})
-    r = requests.post(f"{WEB_BASE_CN}/activity/growth/tasks/{escaped}/claim", headers=hdr_web, timeout=12)
+    r = req.post(f"{WEB_BASE_CN}/activity/growth/tasks/{escaped}/claim", headers=hdr_web, timeout=12)
     try:
         return r.json()
     except Exception:
         return {"status": r.status_code}
 
 
-def refresh_cbcn_token(refresh_token: str, access_token: str = "", uid: str = "", timeout: int = 20) -> dict:
+def refresh_cbcn_token(refresh_token: str, access_token: str = "", uid: str = "", timeout: int = 20, session: requests.Session | None = None) -> dict:
     """Refresh CBCN OAuth credentials (single-use RT rotation!)."""
+    req = session or requests
     hdrs = {
         "Content-Type": "application/json",
         "Accept": "application/json",
@@ -293,7 +298,7 @@ def refresh_cbcn_token(refresh_token: str, access_token: str = "", uid: str = ""
         hdrs["Authorization"] = f"Bearer {access_token}"
     if uid:
         hdrs["X-User-Id"] = uid
-    r = requests.post(f"{CHAT_BASE_CN}/v2/plugin/auth/token/refresh", json={}, headers=hdrs, timeout=timeout)
+    r = req.post(f"{CHAT_BASE_CN}/v2/plugin/auth/token/refresh", json={}, headers=hdrs, timeout=timeout)
     if not r.ok:
         return {"ok": False, "status": r.status_code, "text": r.text[:200]}
     body = r.json()

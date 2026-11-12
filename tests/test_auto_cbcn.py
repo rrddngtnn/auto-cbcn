@@ -161,7 +161,7 @@ def test_cron_file_prefix_and_refresh_contract():
         assert len(accs) == 1
         assert accs[0]["access_token"] == "at1"
 
-    with patch("auto_cbcn.cron.get_cbcn_user_resource") as m_res, patch("auto_cbcn.cron.refresh_cbcn_token") as m_ref, patch("auto_cbcn.cron.requests.post") as m_post, patch("auto_cbcn.cron.requests.get") as m_get:
+    with patch("auto_cbcn.cron.get_cbcn_user_resource") as m_res, patch("auto_cbcn.cron.refresh_cbcn_token") as m_ref, patch("auto_cbcn.cron.requests.Session.post") as m_post, patch("auto_cbcn.cron.requests.Session.get") as m_get:
         m_res.side_effect = [
             {"ok": False, "status": 401},
             {"ok": True, "remaining_credits": 500.0, "total_credits": 500.0, "pack_count": 1},
@@ -171,8 +171,9 @@ def test_cron_file_prefix_and_refresh_contract():
         m_post.return_value = MagicMock(status_code=200, ok=True, json=lambda: {"code": 0, "data": {"credits": 100}})
         m_get.return_value = MagicMock(status_code=200, ok=True, json=lambda: {"code": 0, "data": {}})
         acc = {"name": "a1", "uid": "u1", "access_token": "at1", "refresh_token": "rt1"}
-        out = process_account_record(acc, allow_drip=False, allow_refresh=True)
+        out = process_account_record(acc, allow_drip=False, allow_refresh=True, proxy_url="http://u:p@127.0.0.1:10080")
         assert out["refreshed"] is True
+        assert out["proxy"] == "127.0.0.1:10080"
         assert acc["access_token"] == "at2"
         assert acc["refresh_token"] == "rt2"
 

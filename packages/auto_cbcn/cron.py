@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import base64
 import datetime
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -82,9 +83,17 @@ def _is_11140(code: int, body: dict | str | None) -> bool:
     return code == 403 and ("11140" in t or "账号存在异常行为" in t)
 
 
-def run_single_safe_task(at: str, uid: str, nick: str, tcode: str, is_mp: bool) -> str:
+def run_single_safe_task(
+    at: str,
+    uid: str,
+    nick: str,
+    tcode: str,
+    is_mp: bool,
+    session: requests.Session | None = None,
+) -> str:
     """Execute 1 safe growth task using official bare-array payload structure."""
-    accept_growth_tasks(at, [tcode], uid=uid, mp=is_mp)
+    req = session or requests
+    accept_growth_tasks(at, [tcode], uid=uid, mp=is_mp, session=session)
     time.sleep(1.5)
     now_ms = int(time.time() * 1000)
     rid = uuid.uuid4().hex
@@ -116,11 +125,11 @@ def run_single_safe_task(at: str, uid: str, nick: str, tcode: str, is_mp: bool) 
 
     if tcode == "first_buddy":
         ev = [{**fp, "eventCode": "chat_request_send", "conversationId": cid, "requestId": rid, "inputLength": 16, "mode": "craft", "agentName": "cli", "agentType": "main", "rootRequestId": rid, "parentConversationId": cid}]
-        requests.post(f"{CHAT_BASE_CN}/v2/report", json=ev, headers=_billing_headers(at, uid), timeout=15)
+        req.post(f"{CHAT_BASE_CN}/v2/report", json=ev, headers=_billing_headers(at, uid), timeout=15)
         time.sleep(2.0)
-        requests.post(f"{CHAT_BASE_CN}/activity/growth/buddy/agreement", json={}, headers=_billing_headers(at, uid), timeout=12)
+        req.post(f"{CHAT_BASE_CN}/activity/growth/buddy/agreement", json={}, headers=_billing_headers(at, uid), timeout=12)
         time.sleep(1.0)
-        requests.post(f"{CHAT_BASE_CN}/activity/growth/buddy/first", json={}, headers=_billing_headers(at, uid), timeout=12)
+        req.post(f"{CHAT_BASE_CN}/activity/growth/buddy/first", json={}, headers=_billing_headers(at, uid), timeout=12)
     elif tcode == "Library_read":
         doc_url = "https://www.workbuddy.cn/space/d/o0KWYeynteVv06UnAZqIFm"
         ev = [{
@@ -129,13 +138,13 @@ def run_single_safe_task(at: str, uid: str, nick: str, tcode: str, is_mp: bool) 
             "os": "Win32", "arch": "", "osVersion": "10.0", "userAgent": "Mozilla/5.0",
             "machineId": _derive_id(uid or "anon", "webmachine"), "userId": uid, "userNickname": nick or uid, "enterpriseId": "",
         }]
-        requests.post(f"{WEB_BASE_CN}/v2/report", json=ev, headers=_billing_headers(at, uid, {"x-client-platform": "web", "Origin": WEB_BASE_CN, "Referer": doc_url}), timeout=15)
+        req.post(f"{WEB_BASE_CN}/v2/report", json=ev, headers=_billing_headers(at, uid, {"x-client-platform": "web", "Origin": WEB_BASE_CN, "Referer": doc_url}), timeout=15)
     elif tcode in ("playbook_prompt", "Sequential_Tasks_7"):
         evs = [
             {**fp, "eventCode": "playbook_cta_click", "playbookId": "pb_1", "playbookTitle": "灵感案例"},
             {**fp, "eventCode": "playbook_prompt_send", "playbookId": "pb_1", "playbookTitle": "灵感案例", "promptLength": 18},
         ]
-        requests.post(f"{CHAT_BASE_CN}/v2/report", json=evs, headers=_billing_headers(at, uid), timeout=15)
+        req.post(f"{CHAT_BASE_CN}/v2/report", json=evs, headers=_billing_headers(at, uid), timeout=15)
     elif tcode == "Buddy_App":
         evs = [
             {**fp, "eventCode": "buddyapp_enter_click", "from": "sidebar", "isFirstPage": True},
@@ -144,12 +153,12 @@ def run_single_safe_task(at: str, uid: str, nick: str, tcode: str, is_mp: bool) 
             {**fp, "eventCode": "buddyapp_use_click", "appId": "app_1"},
             {**fp, "eventCode": "buddyapp_launch_success", "appId": "app_1"},
         ]
-        requests.post(f"{CHAT_BASE_CN}/v2/report", json=evs, headers=_billing_headers(at, uid), timeout=15)
+        req.post(f"{CHAT_BASE_CN}/v2/report", json=evs, headers=_billing_headers(at, uid), timeout=15)
     elif tcode in ("RichMeow_Chat", "chat_5"):
         n = 5 if tcode == "chat_5" else 1
         for i in range(n):
             ev = [{**fp, "eventCode": "chat_request_send", "conversationId": cid, "requestId": f"{rid}{i}", "inputLength": 18, "mode": "craft", "agentName": "cli", "agentType": "main", "rootRequestId": f"{rid}{i}", "parentConversationId": cid}]
-            requests.post(f"{CHAT_BASE_CN}/v2/report", json=ev, headers=_billing_headers(at, uid), timeout=15)
+            req.post(f"{CHAT_BASE_CN}/v2/report", json=ev, headers=_billing_headers(at, uid), timeout=15)
             time.sleep(2.0 if n > 1 else 0.5)
     elif tcode.startswith("Sequential_Tasks_") and tcode != "Sequential_Tasks_7":
         ev = [{
@@ -159,19 +168,49 @@ def run_single_safe_task(at: str, uid: str, nick: str, tcode: str, is_mp: bool) 
             "inputLength": 14, "conversationId": cid, "rootRequestId": rid, "parentConversationId": cid,
             "agentName": "mp", "agentType": "main",
         }]
-        requests.post(f"{BILLING_BASE_CN}/v2/report", json=ev, headers=_billing_headers(at, uid, {"X-Client-Platform": "mp-weixin", "X-Client-Product": "workbuddy-mp"}), timeout=15)
+        req.post(f"{BILLING_BASE_CN}/v2/report", json=ev, headers=_billing_headers(at, uid, {"X-Client-Platform": "mp-weixin", "X-Client-Product": "workbuddy-mp"}), timeout=15)
 
     time.sleep(3.0)
-    after = list_growth_tasks(at, uid=uid, mp=is_mp)
+    after = list_growth_tasks(at, uid=uid, mp=is_mp, session=session)
     matched = [t for t in after if t.get("task_code") == tcode]
     if matched and matched[0].get("accept_status") == "completed":
-        c = claim_task_reward(at, tcode, uid=uid, mp=is_mp)
+        c = claim_task_reward(at, tcode, uid=uid, mp=is_mp, session=session)
         return f"claimed:{tcode}:{c.get('code')}"
     st_now = matched[0].get("accept_status") if matched else "missing"
     return f"pending:{tcode}:{st_now}"
 
 
-def process_account_record(acc: dict, allow_drip: bool = True, allow_refresh: bool = False) -> dict:
+def _http_proxies(proxy_url: str | None = None, session_key: str = "") -> dict[str, str] | None:
+    raw = (proxy_url or os.environ.get("CBCN_CRON_PROXY") or os.environ.get("CBCN_PROXY_URL") or "").strip()
+    if not raw:
+        tpl = os.environ.get("PROXY_TEMPLATE", "").strip()
+        host = os.environ.get("PROXY_HOST", "").strip()
+        user = os.environ.get("PROXY_USER", "").strip()
+        pwd = os.environ.get("PROXY_PASS", "").strip()
+        if tpl and host and user:
+            pmin = int(os.environ.get("PROXY_PORT_MIN", "10000"))
+            pmax = int(os.environ.get("PROXY_PORT_MAX", "29999"))
+            if session_key:
+                h = int(hashlib.md5(session_key.encode("utf-8")).hexdigest()[:8], 16)
+                port = pmin + (h % max(1, (pmax - pmin + 1)))
+            else:
+                port = random.randint(pmin, pmax)
+            country = os.environ.get("CBCN_CRON_COUNTRY", "hk").strip() or "hk"
+            base_u = user.split(";")[0].split("__")[0]
+            raw = tpl.format(user=base_u, password=pwd, host=host, port=port, country=country, ttl=30)
+    if not raw:
+        return None
+    if "://" not in raw:
+        raw = f"http://{raw}"
+    return {"http": raw, "https": raw}
+
+
+def process_account_record(
+    acc: dict,
+    allow_drip: bool = True,
+    allow_refresh: bool = False,
+    proxy_url: str | None = None,
+) -> dict:
     """Process daily actions for a single CBCN account (checkin, travel, lottery, safe-drip)."""
     at = acc.get("access_token", "")
     rt = acc.get("refresh_token", "")
@@ -185,10 +224,16 @@ def process_account_record(acc: dict, allow_drip: bool = True, allow_refresh: bo
         res["status"] = "invalid_token_or_uid"
         return res
 
+    sess = requests.Session()
+    proxies = _http_proxies(proxy_url, session_key=uid)
+    if proxies:
+        sess.proxies.update(proxies)
+        res["proxy"] = proxies["https"].split("@")[-1]
+
     # 1. Check resource snapshot & 11140 (optional refresh on 401 if allow_refresh=True)
-    res_before = get_cbcn_user_resource(at, uid=uid)
+    res_before = get_cbcn_user_resource(at, uid=uid, session=sess)
     if not res_before.get("ok") and res_before.get("status") == 401 and allow_refresh and rt:
-        ref = refresh_cbcn_token(rt, access_token=at, uid=uid)
+        ref = refresh_cbcn_token(rt, access_token=at, uid=uid, session=sess)
         if ref.get("ok"):
             at = ref["access_token"]
             rt = ref["refresh_token"]
@@ -196,7 +241,7 @@ def process_account_record(acc: dict, allow_drip: bool = True, allow_refresh: bo
             acc["refresh_token"] = rt
             acc["_refreshed"] = True
             res["refreshed"] = True
-            res_before = get_cbcn_user_resource(at, uid=uid)
+            res_before = get_cbcn_user_resource(at, uid=uid, session=sess)
 
     if not res_before.get("ok"):
         if _is_11140(res_before.get("status", 0), res_before.get("msg") or res_before.get("text")):
@@ -209,7 +254,7 @@ def process_account_record(acc: dict, allow_drip: bool = True, allow_refresh: bo
 
     # 2. Daily checkin (+100 credits)
     try:
-        r_chk = requests.post(f"{BILLING_BASE_CN}/v2/billing/meter/daily-checkin", json={}, headers=_billing_headers(at, uid), timeout=12)
+        r_chk = sess.post(f"{BILLING_BASE_CN}/v2/billing/meter/daily-checkin", json={}, headers=_billing_headers(at, uid), timeout=12)
         cj = r_chk.json() if r_chk.headers.get("content-type", "").startswith("application/json") else {}
         res["checkin"] = cj.get("msg") or cj.get("code") or r_chk.status_code
         if _is_11140(r_chk.status_code, cj):
@@ -221,21 +266,21 @@ def process_account_record(acc: dict, allow_drip: bool = True, allow_refresh: bo
 
     # 3. Streak & Lottery
     try:
-        rs = requests.get(f"{CHAT_BASE_CN}/activity/growth/streak", headers=_billing_headers(at, uid), timeout=12).json()
+        rs = sess.get(f"{CHAT_BASE_CN}/activity/growth/streak", headers=_billing_headers(at, uid), timeout=12).json()
         rstat = (rs.get("data") or {}).get("redemption_status") or {}
         for tier in ("7d", "14d", "28d"):
             if rstat.get(f"tier_{tier}_status") == "unlocked":
-                requests.post(f"{CHAT_BASE_CN}/activity/growth/redeem", json={"tier": tier, "client_token": str(uuid.uuid4())}, headers=_billing_headers(at, uid), timeout=12)
+                sess.post(f"{CHAT_BASE_CN}/activity/growth/redeem", json={"tier": tier, "client_token": str(uuid.uuid4())}, headers=_billing_headers(at, uid), timeout=12)
                 res.setdefault("redeemed", []).append(tier)
                 time.sleep(1.2)
     except Exception:
         pass
 
     try:
-        rl = requests.get(f"{CHAT_BASE_CN}/activity/growth/lottery/summary", headers=_billing_headers(at, uid), timeout=12).json()
+        rl = sess.get(f"{CHAT_BASE_CN}/activity/growth/lottery/summary", headers=_billing_headers(at, uid), timeout=12).json()
         chances = int((rl.get("data") or {}).get("chances") or 0)
         for _ in range(min(chances, 3)):
-            requests.post(f"{CHAT_BASE_CN}/activity/growth/lottery/draw", json={"client_token": str(uuid.uuid4())}, headers=_billing_headers(at, uid), timeout=12)
+            sess.post(f"{CHAT_BASE_CN}/activity/growth/lottery/draw", json={"client_token": str(uuid.uuid4())}, headers=_billing_headers(at, uid), timeout=12)
             res["lottery_draws"] = res.get("lottery_draws", 0) + 1
             time.sleep(1.2)
     except Exception:
@@ -243,16 +288,16 @@ def process_account_record(acc: dict, allow_drip: bool = True, allow_refresh: bo
 
     # 4. Buddy Cat Travel
     try:
-        bi = requests.get(f"{CHAT_BASE_CN}/activity/growth/buddy/info", headers=_billing_headers(at, uid), timeout=12).json()
+        bi = sess.get(f"{CHAT_BASE_CN}/activity/growth/buddy/info", headers=_billing_headers(at, uid), timeout=12).json()
         if (bi.get("data") or {}).get("buddy"):
-            ts = requests.get(f"{CHAT_BASE_CN}/activity/growth/buddy/travel/status", headers=_billing_headers(at, uid), timeout=12).json().get("data") or {}
+            ts = sess.get(f"{CHAT_BASE_CN}/activity/growth/buddy/travel/status", headers=_billing_headers(at, uid), timeout=12).json().get("data") or {}
             if ts.get("state") == "arrived" and ts.get("record_id"):
-                requests.post(f"{CHAT_BASE_CN}/activity/growth/buddy/travel/claim", json={"record_id": ts["record_id"]}, headers=_billing_headers(at, uid), timeout=12)
+                sess.post(f"{CHAT_BASE_CN}/activity/growth/buddy/travel/claim", json={"record_id": ts["record_id"]}, headers=_billing_headers(at, uid), timeout=12)
                 res["travel"] = "claimed"
                 time.sleep(1.5)
-                ts = requests.get(f"{CHAT_BASE_CN}/activity/growth/buddy/travel/status", headers=_billing_headers(at, uid), timeout=12).json().get("data") or {}
+                ts = sess.get(f"{CHAT_BASE_CN}/activity/growth/buddy/travel/status", headers=_billing_headers(at, uid), timeout=12).json().get("data") or {}
             if ts.get("state") == "idle" and not ts.get("daily_limit_reached"):
-                requests.post(f"{CHAT_BASE_CN}/activity/growth/buddy/travel/depart", json={"location_id": random.randint(1, 4)}, headers=_billing_headers(at, uid), timeout=12)
+                sess.post(f"{CHAT_BASE_CN}/activity/growth/buddy/travel/depart", json={"location_id": random.randint(1, 4)}, headers=_billing_headers(at, uid), timeout=12)
                 res["travel"] = res.get("travel", "") + "+departed"
     except Exception:
         pass
@@ -267,8 +312,8 @@ def process_account_record(acc: dict, allow_drip: bool = True, allow_refresh: bo
             pass
 
     if allow_drip and age_hours >= 24.0:
-        std = list_growth_tasks(at, uid=uid, mp=False)
-        mp = list_growth_tasks(at, uid=uid, mp=True)
+        std = list_growth_tasks(at, uid=uid, mp=False, session=sess)
+        mp = list_growth_tasks(at, uid=uid, mp=True, session=sess)
         by_code = {t["task_code"]: (t, False) for t in std if t.get("task_code")}
         for t in mp:
             tc = t.get("task_code")
@@ -282,15 +327,15 @@ def process_account_record(acc: dict, allow_drip: bool = True, allow_refresh: bo
             if t.get("locked") or t.get("accept_status") == "claimed":
                 continue
             if t.get("accept_status") == "completed":
-                c = claim_task_reward(at, tc, uid=uid, mp=is_mp)
+                c = claim_task_reward(at, tc, uid=uid, mp=is_mp, session=sess)
                 res["drip_task"] = f"claimed_existing:{tc}:{c.get('code')}"
             else:
-                res["drip_task"] = run_single_safe_task(at, uid, nick, tc, is_mp)
+                res["drip_task"] = run_single_safe_task(at, uid, nick, tc, is_mp, session=sess)
             break
     elif age_hours < 24.0:
         res["drip_task"] = f"quiet_period_skip({age_hours:.1f}h<24h)"
 
-    res_after = get_cbcn_user_resource(at, uid=uid)
+    res_after = get_cbcn_user_resource(at, uid=uid, session=sess)
     res["credits_after"] = res_after.get("remaining_credits", res.get("credits_before", 0.0))
     res["status"] = "ok"
     return res
@@ -395,6 +440,7 @@ def execute_cron_pass(
     salt: bytes = DEFAULT_SALT,
     allow_drip: bool = True,
     allow_refresh: bool = False,
+    proxy_url: str | None = None,
 ) -> dict:
     """Run universal daily cron pass across all resolved CBCN accounts."""
     accounts = load_accounts_from_source(source, secret=secret, salt=salt)
@@ -404,7 +450,7 @@ def execute_cron_pass(
     for i, acc in enumerate(accounts):
         if i > 0:
             time.sleep(random.uniform(4.0, 9.0))
-        r = process_account_record(acc, allow_drip=allow_drip, allow_refresh=allow_refresh)
+        r = process_account_record(acc, allow_drip=allow_drip, allow_refresh=allow_refresh, proxy_url=proxy_url)
 
         if acc.get("source") == "sqlite" and acc.get("id"):
             db_p = acc.get("db_path") or DEFAULT_DB_PATH
@@ -464,6 +510,7 @@ def main(argv=None) -> int:
     ap.add_argument("--print-cron", action="store_true", help="Print crontab configuration line")
     ap.add_argument("--no-drip", action="store_true", help="Skip growth task dripping (run check-in and travel only)")
     ap.add_argument("--allow-refresh", action="store_true", help="Allow refreshing 401 tokens (only for standalone sources without router auto-refresh)")
+    ap.add_argument("--proxy-url", default="", help="Optional HTTP/SOCKS proxy URL for cron requests (or set CBCN_CRON_PROXY / PROXY_TEMPLATE)")
     args = ap.parse_args(argv)
 
     if args.print_cron:
@@ -474,13 +521,13 @@ def main(argv=None) -> int:
         print(f"[DAEMON] Starting universal auto-cbcn daemon (interval: {args.interval}s, source: {args.source})", flush=True)
         while True:
             try:
-                res = execute_cron_pass(source=args.source, allow_drip=not args.no_drip, allow_refresh=args.allow_refresh)
+                res = execute_cron_pass(source=args.source, allow_drip=not args.no_drip, allow_refresh=args.allow_refresh, proxy_url=args.proxy_url or None)
                 print(json.dumps(res, indent=2, ensure_ascii=False), flush=True)
             except Exception as e:
                 print(f"[DAEMON ERROR] {e}", file=sys.stderr, flush=True)
             time.sleep(args.interval)
 
-    res = execute_cron_pass(source=args.source, allow_drip=not args.no_drip, allow_refresh=args.allow_refresh)
+    res = execute_cron_pass(source=args.source, allow_drip=not args.no_drip, allow_refresh=args.allow_refresh, proxy_url=args.proxy_url or None)
     print(json.dumps(res, indent=2, ensure_ascii=False))
     return 0
 

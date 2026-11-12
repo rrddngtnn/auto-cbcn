@@ -153,12 +153,12 @@ def cmd_cron(args) -> None:
         print(f"[DAEMON] Starting universal auto-cbcn cron daemon (interval: {args.interval}s, source: {args.source})", flush=True)
         while True:
             try:
-                res = execute_cron_pass(source=args.source, allow_drip=not args.no_drip, allow_refresh=args.allow_refresh)
+                res = execute_cron_pass(source=args.source, allow_drip=not args.no_drip, allow_refresh=args.allow_refresh, proxy_url=args.proxy_url or None)
                 print(json.dumps(res, indent=2, ensure_ascii=False), flush=True)
             except Exception as e:
                 print(f"[DAEMON ERROR] {e}", file=sys.stderr, flush=True)
             time.sleep(args.interval)
-    res = execute_cron_pass(source=args.source, allow_drip=not args.no_drip, allow_refresh=args.allow_refresh)
+    res = execute_cron_pass(source=args.source, allow_drip=not args.no_drip, allow_refresh=args.allow_refresh, proxy_url=args.proxy_url or None)
     print(json.dumps(res, indent=2, ensure_ascii=False))
 
 
@@ -216,6 +216,7 @@ def main(argv=None) -> int:
     s_cron.add_argument("--print-cron", action="store_true", help="Print crontab configuration line")
     s_cron.add_argument("--no-drip", action="store_true", help="Skip growth task dripping (run checkin and travel only)")
     s_cron.add_argument("--allow-refresh", action="store_true", help="Allow refreshing 401 tokens (only for standalone sources without router auto-refresh)")
+    s_cron.add_argument("--proxy-url", default="", help="Optional HTTP/SOCKS proxy URL for cron requests (or set CBCN_CRON_PROXY / PROXY_TEMPLATE)")
     s_cron.set_defaults(func=cmd_cron)
 
     args = p.parse_args(argv)
