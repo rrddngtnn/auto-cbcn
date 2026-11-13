@@ -374,7 +374,7 @@ class HaozhumaSmsClient:
     def rent_phone(
         self,
         pid: int | str = "88920",
-        ascription: str = "2",
+        ascription: str | None = None,
         isp: str | None = None,
         province: str | None = None,
         exclude: str = "145,146,147,148,149,162,165,167,170,171,172,1789,1849,192",
@@ -383,12 +383,13 @@ class HaozhumaSmsClient:
     ) -> RentedPhone | None:
         sid = str(pid)
         self._active_sid = sid
-        for _ in range(8):
+        asc_val = os.environ.get("HAOZHUMA_ASCRIPTION", "") if ascription is None else ascription
+        for _ in range(10):
             res = self._call(
                 "getPhone",
                 token=self.ensure_token(),
                 sid=sid,
-                ascription=ascription,
+                ascription=asc_val,
                 isp=isp or "",
                 Province=province or "",
                 exclude=exclude,
@@ -400,6 +401,7 @@ class HaozhumaSmsClient:
             phone = str(res["phone"]).strip()
             sp_name = str(res.get("sp") or "")
             prov = str(res.get("phone_gsd") or "")
+            got_uid = str(res.get("uid") or "")
             if phone.startswith(BAD_CN_PREFIXES) or "虚拟" in sp_name:
                 self.release(phone, sid=sid)
                 time.sleep(0.4)
