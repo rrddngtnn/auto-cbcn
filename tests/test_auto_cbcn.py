@@ -218,6 +218,22 @@ def test_proxy_config_resolver():
     assert p is not None and "{session}" not in p["https"] and "{port}" not in p["https"]
 
 
+def test_feihu_fresh_only_skips_used_numbers():
+    from unittest.mock import patch
+
+    c = FeihuSmsClient(api_user="u", api_key="k")
+    c._token = "tok"
+    seq = [
+        {"code": 200, "data": {"phone": "18100000001", "order_id": "o1", "isp": "中国电信", "province": "河北", "last_event_time": "2026-11-13 01:00:00"}},
+        {"code": 200, "data": {"phone": "18100000002", "order_id": "o2", "isp": "中国电信", "province": "陕西", "last_event_time": ""}},
+    ]
+    with patch.object(c, "_get", side_effect=seq), patch.object(c, "release") as m_rel, patch("auto_cbcn.solver.time.sleep"):
+        r = c.rent_phone(pid=11751, area_code="+86", mode=2, fresh_only=True)
+        assert r is not None
+        assert r.phone == "18100000002"
+        m_rel.assert_called_once_with("o1")
+
+
 def test_cron_loader_contracts():
     with tempfile.TemporaryDirectory() as td:
         fp = Path(td) / "accounts.jsonl"

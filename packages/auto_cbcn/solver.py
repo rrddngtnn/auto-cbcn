@@ -107,32 +107,37 @@ class FeihuSmsClient:
         if mode is not None:
             params["mode"] = mode
 
-        res = self._get("/getPhone", params)
-        data = res.get("data") or {}
-        if res.get("code") != 200 or not data.get("phone"):
-            return None
-        phone = str(data["phone"])
-        oid = str(data["order_id"])
-        isp_name = str(data.get("isp") or "")
-        prov_name = str(data.get("province") or "")
-        last_ev = str(data.get("last_event_time") or "").strip()
-        eff_area = "+852" if (isp_name == "香港" or prov_name == "香港" or len(phone) == 8) else area_code
-        if fresh_only and last_ev:
-            self.release(oid)
-            return None
-        if eff_area == "+86" and (phone.startswith(BAD_CN_PREFIXES) or "虚拟" in isp_name):
-            self.release(oid)
-            return None
-        return RentedPhone(
-            provider="feihu",
-            phone=phone,
-            area_code=eff_area,
-            order_id=oid,
-            project_id=str(pid),
-            isp=isp_name,
-            province=prov_name,
-            last_event_time=last_ev,
-        )
+        max_scan = 15 if fresh_only else 5
+        for _ in range(max_scan):
+            res = self._get("/getPhone", params)
+            data = res.get("data") or {}
+            if res.get("code") != 200 or not data.get("phone"):
+                return None
+            phone = str(data["phone"])
+            oid = str(data["order_id"])
+            isp_name = str(data.get("isp") or "")
+            prov_name = str(data.get("province") or "")
+            last_ev = str(data.get("last_event_time") or "").strip()
+            eff_area = "+852" if (isp_name == "香港" or prov_name == "香港" or len(phone) == 8) else area_code
+            if fresh_only and last_ev:
+                self.release(oid)
+                time.sleep(0.35)
+                continue
+            if eff_area == "+86" and (phone.startswith(BAD_CN_PREFIXES) or "虚拟" in isp_name):
+                self.release(oid)
+                time.sleep(0.35)
+                continue
+            return RentedPhone(
+                provider="feihu",
+                phone=phone,
+                area_code=eff_area,
+                order_id=oid,
+                project_id=str(pid),
+                isp=isp_name,
+                province=prov_name,
+                last_event_time=last_ev,
+            )
+        return None
 
     def poll_otp(self, order_id: str, timeout_sec: int = 55, interval_sec: float = 3.5) -> tuple[str | None, str]:
         deadline = time.time() + timeout_sec
