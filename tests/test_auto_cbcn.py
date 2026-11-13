@@ -294,6 +294,15 @@ def test_haomadun_proxy_and_upgraded_drip_tasks():
     for expected in ("skill_1", "automation_1", "template_5", "create_canvas", "expert_5", "Expert_team_use_3"):
         assert expected in SAFE_DRIP_TASKS
 
+    from auto_cbcn.solver import HaozhumaSmsClient, build_sms_client
+    assert isinstance(build_sms_client("haozhuma"), HaozhumaSmsClient)
+    hz = HaozhumaSmsClient(api_user="u", api_key="p")
+    with patch.object(hz, "_call", return_value={"code": "0", "phone": "18158867901", "sp": "电信", "phone_gsd": "安徽 合肥"}) as m_hz:
+        hz._token = "tok"
+        rp = hz.rent_phone(pid="88920")
+        assert rp is not None and rp.phone == "18158867901" and rp.provider == "haozhuma"
+        assert m_hz.called
+
     sess = MagicMock()
     sess.post.return_value = MagicMock(status_code=200, ok=True, json=lambda: {"code": 0, "data": {}})
     with patch("auto_cbcn.cron.accept_growth_tasks"), patch("auto_cbcn.cron.time.sleep"), patch(

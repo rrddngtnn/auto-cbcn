@@ -20,7 +20,7 @@ from .harvester import (
     harvest_cbcn_safe,
     poll_cbcn_cli_token,
 )
-from .solver import EjiemaSmsClient, FeihuSmsClient, HaomadunSmsClient, probe_cbcn_inference
+from .solver import EjiemaSmsClient, FeihuSmsClient, HaomadunSmsClient, HaozhumaSmsClient, probe_cbcn_inference
 from .store import dispatch_credential_sink, load_dotenv_file
 
 
@@ -61,6 +61,19 @@ def cmd_doctor(_args) -> None:
         except Exception:
             pass
 
+    hz_user = os.environ.get("HAOZHUMA_API_USER", "")
+    hz_pass = os.environ.get("HAOZHUMA_API_PASS", "") or os.environ.get("HAOZHUMA_API_KEY", "")
+    hz_ok, hz_bal = False, 0.0
+    if hz_user and hz_pass:
+        try:
+            hz = HaozhumaSmsClient()
+            hz.login()
+            s_hz = hz.summary()
+            hz_ok = str(s_hz.get("code")) == "0"
+            hz_bal = float(s_hz.get("money") or 0.0)
+        except Exception:
+            pass
+
     doc = {
         "ok": True,
         "environment": {
@@ -73,6 +86,7 @@ def cmd_doctor(_args) -> None:
         },
         "providers": {
             "feihu": {"configured": bool(feihu_user and feihu_key), "connected": feihu_ok, "balance_rmb": feihu_bal},
+            "haozhuma": {"configured": bool(hz_user and hz_pass), "connected": hz_ok, "balance_rmb": hz_bal},
             "ejiema": {"configured": bool(ejiema_tok), "connected": ejiema_ok, "balance": ejiema_bal},
             "haomadun": {"configured": bool(haomadun_key), "connected": haomadun_ok},
         },
@@ -203,7 +217,7 @@ def main(argv=None) -> int:
     s_harv.set_defaults(func=cmd_harvest)
 
     s_reg = sub.add_parser("register", help="Run automated browser registration, captcha solving, and harvest")
-    s_reg.add_argument("--sms-provider", default="feihu", choices=["feihu", "ejiema", "haomadun"], help="BYOP SMS provider adapter")
+    s_reg.add_argument("--sms-provider", default="feihu", choices=["feihu", "haozhuma", "ejiema", "haomadun"], help="BYOP SMS provider adapter")
     s_reg.add_argument("--sms-keyword", default="腾讯科技", help="Keyword for Ejiema SMS adapter")
     s_reg.add_argument("--channel-uid", default="21986-HBY3OAE45E", help="Channel UID for Haomadun SMS adapter")
     s_reg.add_argument("--fresh-only", action="store_true", help="Skip numbers with non-empty last_event_time (Feihu)")

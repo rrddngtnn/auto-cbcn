@@ -324,6 +324,126 @@ class HaomadunSmsClient:
         return None
 
 
+class HaozhumaSmsClient:
+    """BYOP SMS client for Haozhuma (https://api.haozhuma.com/sms/)."""
+
+    def __init__(
+        self,
+        api_user: str | None = None,
+        api_key: str | None = None,
+        base_url: str | None = None,
+        author: str | None = None,
+    ) -> None:
+        load_dotenv_file()
+        self.api_user = api_user or os.environ.get("HAOZHUMA_API_USER", "")
+        self.api_key = api_key or os.environ.get("HAOZHUMA_API_PASS", "") or os.environ.get("HAOZHUMA_API_KEY", "")
+        self.base_url = (base_url or os.environ.get("HAOZHUMA_BASE_URL", "https://api.haozhuma.com/sms/")).rstrip("/") + "/"
+        self.author = author or os.environ.get("HAOZHUMA_AUTHOR", "")
+        self._token = ""
+        self._active_sid = ""
+
+    def _call(self, api: str, **params: object) -> dict:
+        import requests
+
+        q: dict[str, str] = {"api": api}
+        for k, v in params.items():
+            if v is not None and v != "":
+                q[k] = str(v)
+        r = requests.get(self.base_url, params=q, headers={"User-Agent": "Mozilla/5.0"}, timeout=15)
+        try:
+            return r.json()
+        except Exception:
+            return {"code": -1, "msg": r.text[:200]}
+
+    def login(self) -> str:
+        if not self.api_user or not self.api_key:
+            raise ValueError("HAOZHUMA_API_USER and HAOZHUMA_API_PASS are required")
+        res = self._call("login", user=self.api_user, **{"pass": self.api_key})
+        tok = str(res.get("token") or "")
+        if str(res.get("code")) != "0" or not tok:
+            raise RuntimeError(f"Haozhuma login failed: {res}")
+        self._token = tok
+        return tok
+
+    def ensure_token(self) -> str:
+        return self._token or self.login()
+
+    def summary(self) -> dict:
+        return self._call("getSummary", token=self.ensure_token())
+
+    def rent_phone(
+        self,
+        pid: int | str = "88920",
+        ascription: str = "2",
+        isp: str | None = None,
+        province: str | None = None,
+        exclude: str = "145,146,147,148,149,162,165,167,170,171,172,1789,1849,192",
+        docking_uid: str = "",
+        **_kwargs,
+    ) -> RentedPhone | None:
+        sid = str(pid)
+        self._active_sid = sid
+        for _ in range(8):
+            res = self._call(
+                "getPhone",
+                token=self.ensure_token(),
+                sid=sid,
+                ascription=ascription,
+                isp=isp or "",
+                Province=province or "",
+                exclude=exclude,
+                uid=docking_uid or os.environ.get("HAOZHUMA_DOCKING_UID", ""),
+                author=self.author,
+            )
+            if str(res.get("code")) != "0" or not res.get("phone"):
+                return None
+            phone = str(res["phone"]).strip()
+            sp_name = str(res.get("sp") or "")
+            prov = str(res.get("phone_gsd") or "")
+            if phone.startswith(BAD_CN_PREFIXES) or "虚拟" in sp_name:
+                self.release(phone, sid=sid)
+                time.sleep(0.4)
+                continue
+            return RentedPhone(
+                provider="haozhuma",
+                phone=phone,
+                area_code="+86",
+                order_id=phone,
+                project_id=sid,
+                isp=sp_name,
+                province=prov,
+            )
+        return None
+
+    def poll_otp(self, order_id: str, timeout_sec: int = 60, interval_sec: float = 4.0) -> tuple[str | None, str]:
+        deadline = time.time() + timeout_sec
+        last_note = "timeout"
+        start_t = time.time()
+        sid = self._active_sid or os.environ.get("HAOZHUMA_SID", "88920")
+        while time.time() < deadline:
+            res = self._call("getMessage", token=self.ensure_token(), sid=sid, phone=order_id)
+            code_val = str(res.get("yzm") or "").strip()
+            sms_txt = str(res.get("sms") or "").strip()
+            if str(res.get("code")) == "0":
+                if code_val:
+                    return code_val, sms_txt or code_val
+                if sms_txt:
+                    m = re.search(r"\b([0-9]{6})\b", sms_txt)
+                    if m:
+                        return m.group(1), sms_txt
+            msg = str(res.get("msg") or "")
+            elapsed = int(time.time() - start_t)
+            last_note = f"{msg or res.get('code')}({elapsed}s/{timeout_sec}s)"
+            time.sleep(interval_sec)
+        return None, last_note
+
+    def release(self, order_id: str, sid: str = "") -> dict:
+        return self._call("cancelRecv", token=self.ensure_token(), sid=sid or self._active_sid or "88920", phone=order_id)
+
+    def release_all(self) -> dict:
+        return self._call("cancelAllRecv", token=self.ensure_token())
+
+
 def build_sms_client(provider: str = "feihu", proxy_url: str | None = None):
     """Instantiate a BYOP SMS client by provider name."""
     p = provider.strip().lower()
@@ -333,6 +453,8 @@ def build_sms_client(provider: str = "feihu", proxy_url: str | None = None):
         return EjiemaSmsClient()
     if p == "haomadun":
         return HaomadunSmsClient(proxy_url=proxy_url)
+    if p in ("haozhuma", "haozhu"):
+        return HaozhumaSmsClient()
     raise ValueError(f"Unsupported SMS provider: {provider}")
 
 
