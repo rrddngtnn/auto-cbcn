@@ -244,7 +244,12 @@ def run_single_safe_task(
     return f"pending:{tcode}:{st_now}"
 
 
-def _http_proxies(proxy_url: str | None = None, session_key: str = "") -> dict[str, str] | None:
+def _http_proxies(
+    proxy_url: str | None = None,
+    session_key: str = "",
+    country_override: str | None = None,
+    port_offset: int = 0,
+) -> dict[str, str] | None:
     raw = (proxy_url or os.environ.get("CBCN_CRON_PROXY") or os.environ.get("CBCN_PROXY_URL") or "").strip()
     if not raw:
         tpl = os.environ.get("PROXY_TEMPLATE", "").strip()
@@ -254,12 +259,13 @@ def _http_proxies(proxy_url: str | None = None, session_key: str = "") -> dict[s
         if tpl and host and user:
             pmin = int(os.environ.get("PROXY_PORT_MIN", "10000"))
             pmax = int(os.environ.get("PROXY_PORT_MAX", "29999"))
+            span = max(1, (pmax - pmin + 1))
             if session_key:
                 h = int(hashlib.md5(session_key.encode("utf-8")).hexdigest()[:8], 16)
-                port = pmin + (h % max(1, (pmax - pmin + 1)))
+                port = pmin + ((h + port_offset) % span)
             else:
                 port = random.randint(pmin, pmax)
-            country = os.environ.get("CBCN_CRON_COUNTRY", "hk").strip() or "hk"
+            country = (country_override or os.environ.get("CBCN_CRON_COUNTRY", "hk")).strip() or "hk"
             base_u = user.split(";")[0].split("__")[0]
             raw = tpl.format(user=base_u, password=pwd, host=host, port=port, country=country, ttl=30)
     if not raw:
@@ -271,10 +277,11 @@ def _http_proxies(proxy_url: str | None = None, session_key: str = "") -> dict[s
     if "{session}" in raw or "{port}" in raw:
         pmin = int(os.environ.get("PROXY_PORT_MIN", "10000"))
         pmax = int(os.environ.get("PROXY_PORT_MAX", "29999"))
+        span = max(1, (pmax - pmin + 1))
         if session_key:
             h = int(hashlib.md5(session_key.encode("utf-8")).hexdigest()[:8], 16)
-            port = pmin + (h % max(1, (pmax - pmin + 1)))
-            sid = hashlib.md5(session_key.encode("utf-8")).hexdigest()[:10]
+            port = pmin + ((h + port_offset) % span)
+            sid = hashlib.md5(f"{session_key}:{port_offset}".encode("utf-8")).hexdigest()[:10]
         else:
             port = random.randint(pmin, pmax)
             sid = uuid.uuid4().hex[:10]
@@ -287,6 +294,7 @@ def process_account_record(
     allow_drip: bool = True,
     allow_refresh: bool = False,
     proxy_url: str | None = None,
+    tasks_per_run: int | None = None,
 ) -> dict:
     """Process daily actions for a single CBCN account (checkin, travel, lottery, safe-drip)."""
     at = acc.get("access_token", "")
@@ -302,13 +310,40 @@ def process_account_record(
         return res
 
     sess = requests.Session()
-    proxies = _http_proxies(proxy_url, session_key=uid)
-    if proxies:
-        sess.proxies.update(proxies)
-        res["proxy"] = proxies["https"].split("@")[-1]
+    res_before: dict | None = None
+    pref_country = os.environ.get("CBCN_CRON_COUNTRY", "hk").strip() or "hk"
+    probe_plan = [
+        (pref_country, 0),
+        (pref_country, 1),
+        (pref_country, 2),
+    ]
+    if pref_country.lower() != "hk":
+        probe_plan.append(("hk", 0))
+
+    last_err = ""
+    for cc, poff in probe_plan:
+        sess = requests.Session()
+        proxies = _http_proxies(proxy_url, session_key=uid, country_override=cc, port_offset=poff)
+        if proxies:
+            sess.proxies.update(proxies)
+        try:
+            res_before = get_cbcn_user_resource(at, uid=uid, session=sess)
+            if proxies:
+                res["proxy"] = proxies["https"].split("@")[-1]
+                if cc != pref_country:
+                    res["proxy_country_fallback"] = cc
+            break
+        except (requests.exceptions.ProxyError, requests.exceptions.ConnectTimeout, requests.exceptions.ConnectionError) as e:
+            last_err = str(e)[:120]
+            if not proxies:
+                break
+            continue
+
+    if res_before is None:
+        res["status"] = f"proxy_error:{last_err[:60]}"
+        return res
 
     # 1. Check resource snapshot & 11140 (optional refresh on 401 if allow_refresh=True)
-    res_before = get_cbcn_user_resource(at, uid=uid, session=sess)
     if not res_before.get("ok") and res_before.get("status") == 401 and allow_refresh and rt:
         ref = refresh_cbcn_token(rt, access_token=at, uid=uid, session=sess)
         if ref.get("ok"):
@@ -402,6 +437,8 @@ def process_account_record(
             pass
 
     if allow_drip and age_hours >= 24.0:
+        max_tasks = int(tasks_per_run if tasks_per_run is not None else os.environ.get("CBCN_CRON_TASKS_PER_RUN", "3"))
+        max_tasks = max(1, min(max_tasks, 6))
         std = list_growth_tasks(at, uid=uid, mp=False, session=sess)
         mp = list_growth_tasks(at, uid=uid, mp=True, session=sess)
         by_code = {t["task_code"]: (t, False) for t in std if t.get("task_code")}
@@ -410,18 +447,25 @@ def process_account_record(
             if tc and tc not in by_code:
                 by_code[tc] = (t, tc in MP_TASK_CODES)
 
+        done_tasks: list[str] = []
         for tc in SAFE_DRIP_TASKS:
+            if len(done_tasks) >= max_tasks:
+                break
             if tc not in by_code:
                 continue
             t, is_mp = by_code[tc]
             if t.get("locked") or t.get("accept_status") == "claimed":
                 continue
+            if done_tasks:
+                time.sleep(random.uniform(5.5, 13.5))
             if t.get("accept_status") == "completed":
                 c = claim_task_reward(at, tc, uid=uid, mp=is_mp, session=sess)
-                res["drip_task"] = f"claimed_existing:{tc}:{c.get('code')}"
+                done_tasks.append(f"claimed_existing:{tc}:{c.get('code')}")
             else:
-                res["drip_task"] = run_single_safe_task(at, uid, nick, tc, is_mp, session=sess)
-            break
+                done_tasks.append(run_single_safe_task(at, uid, nick, tc, is_mp, session=sess))
+        if done_tasks:
+            res["drip_tasks"] = done_tasks
+            res["drip_task"] = ", ".join(done_tasks)
     elif age_hours < 24.0:
         res["drip_task"] = f"quiet_period_skip({age_hours:.1f}h<24h)"
 
@@ -531,16 +575,31 @@ def execute_cron_pass(
     allow_drip: bool = True,
     allow_refresh: bool = False,
     proxy_url: str | None = None,
+    tasks_per_run: int | None = None,
+    jitter_minutes: float | None = None,
 ) -> dict:
     """Run universal daily cron pass across all resolved CBCN accounts."""
+    jit_m = float(jitter_minutes if jitter_minutes is not None else (os.environ.get("CBCN_CRON_JITTER_MIN") or 0.0))
+    slept_sec = 0.0
+    if jit_m > 0:
+        # Non-uniform human-like spread across [0.5m, jit_m]
+        slept_sec = round(random.uniform(min(30.0, jit_m * 60.0), jit_m * 60.0), 1)
+        time.sleep(slept_sec)
+
     accounts = load_accounts_from_source(source, secret=secret, salt=salt)
     results = []
     ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     for i, acc in enumerate(accounts):
         if i > 0:
-            time.sleep(random.uniform(4.0, 9.0))
-        r = process_account_record(acc, allow_drip=allow_drip, allow_refresh=allow_refresh, proxy_url=proxy_url)
+            time.sleep(random.uniform(5.0, 14.0))
+        r = process_account_record(
+            acc,
+            allow_drip=allow_drip,
+            allow_refresh=allow_refresh,
+            proxy_url=proxy_url,
+            tasks_per_run=tasks_per_run,
+        )
 
         if acc.get("source") == "sqlite" and acc.get("id"):
             db_p = acc.get("db_path") or DEFAULT_DB_PATH
@@ -581,14 +640,15 @@ def execute_cron_pass(
     return {
         "timestamp": ts,
         "source": source,
+        "jitter_sec": slept_sec,
         "scanned": len(accounts),
         "results": results,
     }
 
 
 def print_crontab_snippet(python_bin: str = sys.executable, source: str = "sqlite") -> None:
-    print("# === auto-cbcn universal cronjob (run at 09:15 and 21:15 daily) ===")
-    print(f"15 9,21 * * * {python_bin} -m auto_cbcn.cli cron --run --source {source} >> /var/log/auto-cbcn.log 2>&1")
+    print("# === auto-cbcn universal cronjob (organic jitter ~09:07-09:23 and ~21:07-21:23 daily) ===")
+    print(f"7 9,21 * * * {python_bin} -m auto_cbcn.cli cron --run --source {source} --tasks-per-run 3 --jitter-minutes 16 >> /var/log/auto-cbcn.log 2>&1")
 
 
 def main(argv=None) -> int:
@@ -601,6 +661,8 @@ def main(argv=None) -> int:
     ap.add_argument("--no-drip", action="store_true", help="Skip growth task dripping (run check-in and travel only)")
     ap.add_argument("--allow-refresh", action="store_true", help="Allow refreshing 401 tokens (only for standalone sources without router auto-refresh)")
     ap.add_argument("--proxy-url", default="", help="Optional HTTP/SOCKS proxy URL for cron requests (or set CBCN_CRON_PROXY / PROXY_TEMPLATE)")
+    ap.add_argument("--tasks-per-run", type=int, default=None, help="Max growth tasks to drip per account per run after 24h (default: 3)")
+    ap.add_argument("--jitter-minutes", type=float, default=None, help="Random pre-run jitter window in minutes (default: 0)")
     args = ap.parse_args(argv)
 
     if args.print_cron:
@@ -611,13 +673,27 @@ def main(argv=None) -> int:
         print(f"[DAEMON] Starting universal auto-cbcn daemon (interval: {args.interval}s, source: {args.source})", flush=True)
         while True:
             try:
-                res = execute_cron_pass(source=args.source, allow_drip=not args.no_drip, allow_refresh=args.allow_refresh, proxy_url=args.proxy_url or None)
+                res = execute_cron_pass(
+                    source=args.source,
+                    allow_drip=not args.no_drip,
+                    allow_refresh=args.allow_refresh,
+                    proxy_url=args.proxy_url or None,
+                    tasks_per_run=args.tasks_per_run,
+                    jitter_minutes=args.jitter_minutes,
+                )
                 print(json.dumps(res, indent=2, ensure_ascii=False), flush=True)
             except Exception as e:
                 print(f"[DAEMON ERROR] {e}", file=sys.stderr, flush=True)
-            time.sleep(args.interval)
+            time.sleep(max(60, int(args.interval + random.uniform(-420, 420))))
 
-    res = execute_cron_pass(source=args.source, allow_drip=not args.no_drip, allow_refresh=args.allow_refresh, proxy_url=args.proxy_url or None)
+    res = execute_cron_pass(
+        source=args.source,
+        allow_drip=not args.no_drip,
+        allow_refresh=args.allow_refresh,
+        proxy_url=args.proxy_url or None,
+        tasks_per_run=args.tasks_per_run,
+        jitter_minutes=args.jitter_minutes,
+    )
     print(json.dumps(res, indent=2, ensure_ascii=False))
     return 0
 

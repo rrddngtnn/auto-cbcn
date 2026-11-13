@@ -136,16 +136,25 @@ class FeihuSmsClient:
 
     def poll_otp(self, order_id: str, timeout_sec: int = 55, interval_sec: float = 3.5) -> tuple[str | None, str]:
         deadline = time.time() + timeout_sec
+        last_note = "timeout"
+        start_t = time.time()
         while time.time() < deadline:
             res = self._get("/getMessage", {"token": self.ensure_token(), "order_id": order_id})
             data = res.get("data") or {}
             st = data.get("status")
+            code_val = data.get("code") or data.get("sms") or data.get("message")
+            elapsed = int(time.time() - start_t)
+            if code_val:
+                m = re.search(r"\b([0-9]{6})\b", str(code_val))
+                if m:
+                    return m.group(1), str(data.get("message") or code_val)
             if st == 3 and data.get("code"):
                 return str(data["code"]).strip(), str(data.get("message") or "")
             if st in (4, 5, 6):
                 return None, str(res.get("msg") or st)
+            last_note = f"status={st}({elapsed}s/{timeout_sec}s)"
             time.sleep(interval_sec)
-        return None, "timeout"
+        return None, last_note
 
     def release(self, order_id: str) -> dict:
         return self._get("/cancelRecv", {"token": self.ensure_token(), "order_id": order_id})

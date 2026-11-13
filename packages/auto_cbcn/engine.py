@@ -29,9 +29,9 @@ load_dotenv_file()
 
 
 def open_phone_tab(page, auth_url: str, tries: int = 4) -> bool:
-    for _ in range(tries):
+    for tr in range(tries):
         try:
-            page.goto(auth_url, wait_until="commit", timeout=35000)
+            page.goto(auth_url, wait_until="domcontentloaded", timeout=35000)
         except Exception:
             pass
         try:
@@ -48,6 +48,7 @@ def open_phone_tab(page, auth_url: str, tries: int = 4) -> bool:
 def solve_slider(page, cap_store: dict, verify_results: list[str], sms_results: list[tuple[int, str]]) -> tuple[bool, list[str]]:
     logs: list[str] = []
     page.locator("button.oneid-react-verify-code__code-btn").click()
+    page.wait_for_timeout(1000)
     for t_idx in range(4):
         cap_frame = None
         for w_idx in range(60):
@@ -58,7 +59,7 @@ def solve_slider(page, cap_store: dict, verify_results: list[str], sms_results: 
                 logs.append("sms_err:" + [s[1] for s in sms_results if '"errCode"' in s[1]][-1][:140])
                 return False, logs
             for f in page.frames:
-                if "drag_ele" in f.url or "captcha" in f.url:
+                if "drag_ele" in f.url or "captcha" in f.url or "t.captcha.qq.com" in f.url:
                     cap_frame = f
                     break
             if cap_frame and all(k in cap_store for k in ("pre", "bg", "sp")):
@@ -82,7 +83,13 @@ def solve_slider(page, cap_store: dict, verify_results: list[str], sms_results: 
                     pass
 
         if not cap_frame or not all(k in cap_store for k in ("pre", "bg", "sp")):
-            logs.append(f"t{t_idx}:missing(frame={bool(cap_frame)},keys={list(cap_store.keys())})")
+            logs.append(f"t{t_idx}:missing(frame={bool(cap_frame)},keys={list(cap_store.keys())},frames={[f.url[:30] for f in page.frames]})")
+            if t_idx < 3:
+                btn = page.locator("button.oneid-react-verify-code__code-btn")
+                if btn.count() and btn.is_enabled():
+                    btn.click()
+                    page.wait_for_timeout(1000)
+                continue
             return False, logs
 
         page.wait_for_timeout(500)
@@ -101,6 +108,11 @@ def solve_slider(page, cap_store: dict, verify_results: list[str], sms_results: 
         cap_store.pop("sp", None)
 
         new_v = verify_results[prev_v:]
+        if new_v:
+            logs.append(f"t{t_idx}:ver={new_v[-1][:120]}")
+        else:
+            logs.append(f"t{t_idx}:no_ver_resp")
+
         if any('"errorCode":"0"' in v for v in new_v):
             page.wait_for_timeout(1800)
             if any('"status":"unexpired"' in s[1] or '"status":"ok"' in s[1] for s in sms_results):

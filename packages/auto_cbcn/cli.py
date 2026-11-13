@@ -5,6 +5,7 @@ import argparse
 import importlib.util
 import json
 import os
+import random
 import sys
 import time
 
@@ -153,12 +154,26 @@ def cmd_cron(args) -> None:
         print(f"[DAEMON] Starting universal auto-cbcn cron daemon (interval: {args.interval}s, source: {args.source})", flush=True)
         while True:
             try:
-                res = execute_cron_pass(source=args.source, allow_drip=not args.no_drip, allow_refresh=args.allow_refresh, proxy_url=args.proxy_url or None)
+                res = execute_cron_pass(
+                    source=args.source,
+                    allow_drip=not args.no_drip,
+                    allow_refresh=args.allow_refresh,
+                    proxy_url=args.proxy_url or None,
+                    tasks_per_run=args.tasks_per_run,
+                    jitter_minutes=args.jitter_minutes,
+                )
                 print(json.dumps(res, indent=2, ensure_ascii=False), flush=True)
             except Exception as e:
                 print(f"[DAEMON ERROR] {e}", file=sys.stderr, flush=True)
-            time.sleep(args.interval)
-    res = execute_cron_pass(source=args.source, allow_drip=not args.no_drip, allow_refresh=args.allow_refresh, proxy_url=args.proxy_url or None)
+            time.sleep(max(60, int(args.interval + random.uniform(-420, 420))))
+    res = execute_cron_pass(
+        source=args.source,
+        allow_drip=not args.no_drip,
+        allow_refresh=args.allow_refresh,
+        proxy_url=args.proxy_url or None,
+        tasks_per_run=args.tasks_per_run,
+        jitter_minutes=args.jitter_minutes,
+    )
     print(json.dumps(res, indent=2, ensure_ascii=False))
 
 
@@ -217,6 +232,8 @@ def main(argv=None) -> int:
     s_cron.add_argument("--no-drip", action="store_true", help="Skip growth task dripping (run checkin and travel only)")
     s_cron.add_argument("--allow-refresh", action="store_true", help="Allow refreshing 401 tokens (only for standalone sources without router auto-refresh)")
     s_cron.add_argument("--proxy-url", default="", help="Optional HTTP/SOCKS proxy URL for cron requests (or set CBCN_CRON_PROXY / PROXY_TEMPLATE)")
+    s_cron.add_argument("--tasks-per-run", type=int, default=None, help="Max growth tasks to drip per account per run after 24h (default: 3)")
+    s_cron.add_argument("--jitter-minutes", type=float, default=None, help="Random pre-run jitter window in minutes (default: 0)")
     s_cron.set_defaults(func=cmd_cron)
 
     args = p.parse_args(argv)

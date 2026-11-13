@@ -177,6 +177,30 @@ def test_cron_file_prefix_and_refresh_contract():
         assert acc["access_token"] == "at2"
         assert acc["refresh_token"] == "rt2"
 
+    # Multi-task drip (tasks_per_run=3) + jitter test
+    with patch("auto_cbcn.cron.get_cbcn_user_resource") as m_res, patch("auto_cbcn.cron.requests.Session.post") as m_post, patch(
+        "auto_cbcn.cron.requests.Session.get"
+    ) as m_get, patch("auto_cbcn.cron.list_growth_tasks") as m_list, patch(
+        "auto_cbcn.cron.run_single_safe_task"
+    ) as m_run, patch("auto_cbcn.cron.time.sleep"):
+        m_res.return_value = {"ok": True, "remaining_credits": 2200.0, "total_credits": 2200.0, "pack_count": 3}
+        m_post.return_value = MagicMock(status_code=200, ok=True, json=lambda: {"code": 0, "data": {}})
+        m_get.return_value = MagicMock(status_code=200, ok=True, json=lambda: {"code": 0, "data": {}})
+        m_list.side_effect = [
+            [
+                {"task_code": "first_buddy", "accept_status": "not_accepted", "locked": False},
+                {"task_code": "Library_read", "accept_status": "not_accepted", "locked": False},
+                {"task_code": "playbook_prompt", "accept_status": "not_accepted", "locked": False},
+                {"task_code": "skill_1", "accept_status": "not_accepted", "locked": False},
+            ],
+            [],
+        ]
+        m_run.side_effect = ["claimed:first_buddy:0", "claimed:Library_read:0", "claimed:playbook_prompt:0"]
+        acc = {"name": "a2", "uid": "u2", "access_token": "at1", "refresh_token": "rt1"}
+        out = process_account_record(acc, allow_drip=True, tasks_per_run=3)
+        assert len(out["drip_tasks"]) == 3
+        assert m_run.call_count == 3
+
 
 def test_proxy_config_resolver():
     cfg = resolve_proxy_playwright_cfg("http://u1:p1@127.0.0.1:10080")
